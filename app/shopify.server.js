@@ -14,6 +14,12 @@ const shopify = shopifyApp({
   scopes: process.env.SCOPES?.split(","),
   appUrl: process.env.SHOPIFY_APP_URL || "",
   authPathPrefix: "/auth",
+
+  allowedActionOrigins: [
+    "https://bulk.pinakkaa.com",
+    "https://admin.shopify.com",
+  ],
+
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
   future: {
