@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "149cf13afee24141e72288f808c94b3e"
-application_url = "https://example.com"
+application_url = "https://bulk.pinakkaa.com"
 embedded = true
 name = "bulk variant update G sync"
 
@@ -45,7 +45,7 @@ api_version = "2026-10"
   topics = [ "app/scopes_update" ]
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://bulk.pinakkaa.com/auth/callback" ]
 
 [build]
 include_config_on_deploy = true
