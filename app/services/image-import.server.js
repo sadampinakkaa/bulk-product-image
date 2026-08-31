@@ -209,6 +209,8 @@ async function runImportJob({
       job.completedAt =
         new Date().toISOString();
 
+      saveImportHistory(job);
+
       return;
     }
 
@@ -296,7 +298,7 @@ async function runImportJob({
     }
 
     // ==================================================
-    // 4. DOWNLOAD IMAGES CONCURRENTLY
+    // 4. DOWNLOAD IMAGES
     // ==================================================
 
     job.message =
@@ -337,6 +339,7 @@ async function runImportJob({
 
               image,
             };
+
           } catch (
             error
           ) {
@@ -369,11 +372,11 @@ async function runImportJob({
     }
 
     // ==================================================
-    // 5. CREATE SHOPIFY MEDIA
+    // 5. RESOLVE EXISTING MEDIA OR UPLOAD NEW MEDIA
     // ==================================================
 
     job.message =
-      `Uploading ${downloaded.length} image(s) to Shopify...`;
+      `Checking Shopify media for ${downloaded.length} image(s)...`;
 
     const mediaResults =
       await mapWithConcurrency(
@@ -383,9 +386,100 @@ async function runImportJob({
           item
         ) => {
           try {
-            // ------------------------------------------
-            // Create staged upload
-            // ------------------------------------------
+            /*
+             * ------------------------------------------------
+             * IMPORTANT:
+             *
+             * FIRST check if the product already contains
+             * an image whose ALT is the SKU.
+             *
+             * If yes:
+             *
+             * DO NOT upload again.
+             *
+             * We reuse the existing Shopify media.
+             * ------------------------------------------------
+             */
+
+            const existingMedia =
+              await findProductMediaByAlt(
+                admin,
+                item.variant.productId,
+                item.sku
+              );
+
+            if (
+              existingMedia
+            ) {
+              console.log(
+                "[IMAGE IMPORT] Existing Shopify media found:",
+                {
+                  file:
+                    item.file.name,
+
+                  sku:
+                    item.sku,
+
+                  productId:
+                    item.variant.productId,
+
+                  mediaId:
+                    existingMedia.id,
+
+                  status:
+                    existingMedia.status,
+                }
+              );
+
+              /*
+               * Wait until existing media is ready.
+               */
+
+              if (
+                existingMedia.status !==
+                "READY"
+              ) {
+                await waitForMediaReady(
+                  admin,
+                  existingMedia.id
+                );
+              }
+
+              return {
+                ...item,
+
+                media:
+                  existingMedia,
+
+                uploaded:
+                  false,
+
+                reused:
+                  true,
+              };
+            }
+
+            // ------------------------------------------------
+            // NO EXISTING MEDIA
+            // ------------------------------------------------
+
+            console.log(
+              "[IMAGE IMPORT] No existing media found. Uploading:",
+              {
+                file:
+                  item.file.name,
+
+                sku:
+                  item.sku,
+
+                productId:
+                  item.variant.productId,
+              }
+            );
+
+            /*
+             * Create staged upload.
+             */
 
             const resourceUrl =
               await createStagedUpload(
@@ -415,9 +509,9 @@ async function runImportJob({
               }
             );
 
-            // ------------------------------------------
-            // Create product media
-            // ------------------------------------------
+            /*
+             * Create Shopify product media.
+             */
 
             const media =
               await createProductMedia(
@@ -435,7 +529,7 @@ async function runImportJob({
               );
 
             console.log(
-              "[IMAGE IMPORT] Media created:",
+              "[IMAGE IMPORT] New media created:",
               {
                 file:
                   item.file.name,
@@ -457,9 +551,9 @@ async function runImportJob({
               }
             );
 
-            // ------------------------------------------
-            // Wait until Shopify is ready
-            // ------------------------------------------
+            /*
+             * Wait until Shopify finishes processing.
+             */
 
             await waitForMediaReady(
               admin,
@@ -473,6 +567,9 @@ async function runImportJob({
 
               uploaded:
                 true,
+
+              reused:
+                false,
             };
 
           } catch (
@@ -518,34 +615,6 @@ async function runImportJob({
     // 6. GROUP BY PRODUCT
     // ==================================================
 
-    /*
-     * Important:
-     *
-     * Shopify's productVariantAppendMedia mutation
-     * requires that each variantId occurs ONLY ONCE
-     * inside variantMedia.
-     *
-     * Therefore:
-     *
-     * SAME PRODUCT
-     *    ↓
-     * GROUP BY VARIANT
-     *    ↓
-     * ONE variantMedia entry
-     *
-     * Example:
-     *
-     * TEST-001.jpg → Variant A → Media 1
-     * TEST-001-2.jpg → Variant A → Media 2
-     *
-     * becomes:
-     *
-     * {
-     *   variantId: VariantA,
-     *   mediaIds: [Media1, Media2]
-     * }
-     */
-
     job.message =
       "Preparing variant image assignments...";
 
@@ -577,7 +646,7 @@ async function runImportJob({
     );
 
     // ==================================================
-    // 7. ASSIGN MEDIA BY PRODUCT
+    // 7. ASSIGN MEDIA
     // ==================================================
 
     job.message =
@@ -619,6 +688,9 @@ async function runImportJob({
 
                 error:
                   error?.message,
+
+                stack:
+                  error?.stack,
               }
             );
 
@@ -661,12 +733,6 @@ async function runImportJob({
         continue;
       }
 
-      /*
-       * Verify each image individually.
-       *
-       * We do NOT call the assignment mutation again.
-       */
-
       for (
         const item of
           result.items
@@ -703,8 +769,15 @@ async function runImportJob({
 
                 mediaId:
                   item.media.id,
+
+                uploaded:
+                  item.uploaded,
+
+                reused:
+                  item.reused,
               }
             );
+
           } else {
             recordError(
               job,
@@ -758,6 +831,8 @@ async function runImportJob({
 
     job.completedAt =
       new Date().toISOString();
+
+    saveImportHistory(job);
   }
 }
 
@@ -797,7 +872,7 @@ function deduplicateDriveFiles(
 }
 
 // ======================================================
-// GROUP MEDIA BY PRODUCT + VARIANT
+// GROUP MEDIA BY PRODUCT
 // ======================================================
 
 function groupMediaByProduct(
@@ -857,6 +932,7 @@ function finishJob(
 
     job.message =
       `Import finished with ${job.summary.errors} error(s). ${job.summary.imagesAssigned} image(s) were assigned to variants.`;
+
   } else {
     job.status =
       "completed";
@@ -868,7 +944,9 @@ function finishJob(
   job.completedAt =
     new Date().toISOString();
 
-    saveImportHistory(job);
+  saveImportHistory(
+    job
+  );
 
   console.log(
     "[IMAGE IMPORT] JOB FINISHED:",
@@ -1088,11 +1166,6 @@ async function loadAllVariants(
         normalizeSku(
           variant.sku
         );
-
-      /*
-       * If duplicate SKUs exist in Shopify,
-       * keep the first one and log the duplicate.
-       */
 
       if (
         map.has(
@@ -1404,21 +1477,10 @@ async function createProductMedia(
   }
 
   /*
-   * IMPORTANT:
+   * The productUpdate response does not directly
+   * return the created media.
    *
-   * We intentionally do not request `fileErrors`.
-   *
-   * Requesting fileErrors requires additional scopes
-   * such as read_files/read_themes/read_images.
-   *
-   * The importer does not need those scopes.
-   */
-
-  /*
-   * productUpdate does not return the newly-created
-   * media directly in a reliable way.
-   *
-   * Therefore fetch the product media after creation.
+   * Therefore locate it by ALT.
    */
 
   const media =
@@ -1451,7 +1513,7 @@ async function findProductMediaByAlt(
   const response =
     await admin.graphql(
       `#graphql
-      query ProductMediaAfterCreate(
+      query ProductMediaByAlt(
         $id: ID!
       ) {
         product(
@@ -1498,10 +1560,17 @@ async function findProductMediaByAlt(
     );
   }
 
+  const product =
+    json.data?.product;
+
+  if (!product) {
+    throw new Error(
+      `Shopify product ${productId} could not be found.`
+    );
+  }
+
   const media =
-    json.data
-      ?.product
-      ?.media
+    product.media
       ?.nodes ||
     [];
 
@@ -1510,42 +1579,52 @@ async function findProductMediaByAlt(
       alt
     );
 
-  const images =
+  const matchingImages =
     media.filter(
       (
         item
       ) =>
         item.mediaContentType ===
-        "IMAGE"
+          "IMAGE" &&
+        normalizeSku(
+          item.alt
+        ) ===
+          normalizedAlt
     );
 
-  /*
-   * Return the newest matching media.
-   *
-   * Shopify generally returns recently created
-   * media near the end of the connection.
-   */
-
-  for (
-    let index =
-      images.length - 1;
-    index >= 0;
-    index--
+  if (
+    !matchingImages.length
   ) {
-    const item =
-      images[index];
-
-    if (
-      normalizeSku(
-        item.alt
-      ) ===
-      normalizedAlt
-    ) {
-      return item;
-    }
+    return null;
   }
 
-  return null;
+  /*
+   * Prefer READY media.
+   *
+   * If multiple images have the same ALT,
+   * return the newest matching image.
+   */
+
+  const ready =
+    matchingImages.filter(
+      (
+        item
+      ) =>
+        item.status ===
+        "READY"
+    );
+
+  if (
+    ready.length
+  ) {
+    return ready[
+      ready.length - 1
+    ];
+  }
+
+  return matchingImages[
+    matchingImages.length - 1
+  ];
 }
 
 // ======================================================
@@ -1652,6 +1731,81 @@ async function waitForMediaReady(
 }
 
 // ======================================================
+// GET VARIANT MEDIA
+// ======================================================
+
+async function getVariantMedia(
+  admin,
+  variantId
+) {
+  const response =
+    await admin.graphql(
+      `#graphql
+      query VariantMedia(
+        $id: ID!
+      ) {
+        productVariant(
+          id: $id
+        ) {
+          id
+
+          media(
+            first: 250
+          ) {
+            nodes {
+              id
+              alt
+              status
+              mediaContentType
+            }
+          }
+        }
+      }
+      `,
+      {
+        variables: {
+          id:
+            variantId,
+        },
+      }
+    );
+
+  const json =
+    await response.json();
+
+  if (
+    json.errors?.length
+  ) {
+    throw new Error(
+      json.errors
+        .map(
+          (
+            error
+          ) =>
+            error.message
+        )
+        .join("; ")
+    );
+  }
+
+  const variant =
+    json.data
+      ?.productVariant;
+
+  if (!variant) {
+    throw new Error(
+      `Shopify variant ${variantId} could not be found.`
+    );
+  }
+
+  return (
+    variant.media
+      ?.nodes ||
+    []
+  );
+}
+
+// ======================================================
 // ASSIGN ALL MEDIA FOR ONE PRODUCT
 // ======================================================
 
@@ -1664,32 +1818,8 @@ async function assignProductMediaBatch(
 ) {
   /*
    * ----------------------------------------------------
-   * CRITICAL FIX
+   * GROUP BY VARIANT
    * ----------------------------------------------------
-   *
-   * Group by VARIANT.
-   *
-   * Shopify does NOT allow:
-   *
-   * [
-   *   {
-   *     variantId: "A",
-   *     mediaIds: ["1"]
-   *   },
-   *   {
-   *     variantId: "A",
-   *     mediaIds: ["2"]
-   *   }
-   * ]
-   *
-   * Instead it requires:
-   *
-   * [
-   *   {
-   *     variantId: "A",
-   *     mediaIds: ["1", "2"]
-   *   }
-   * ]
    */
 
   const variantGroups =
@@ -1753,7 +1883,7 @@ async function assignProductMediaBatch(
   );
 
   // ----------------------------------------------------
-  // Remove already assigned media
+  // BUILD PENDING GROUPS
   // ----------------------------------------------------
 
   const pendingVariantGroups =
@@ -1765,6 +1895,29 @@ async function assignProductMediaBatch(
       group,
     ] of variantGroups
   ) {
+    /*
+     * Get ALL media currently attached to this variant.
+     *
+     * This is important because the target media may already
+     * be assigned.
+     */
+
+    const currentMedia =
+      await getVariantMedia(
+        admin,
+        variantId
+      );
+
+    const currentMediaIds =
+      new Set(
+        currentMedia.map(
+          (
+            media
+          ) =>
+            media.id
+        )
+      );
+
     const pendingMedia =
       [];
 
@@ -1772,67 +1925,38 @@ async function assignProductMediaBatch(
       const item of
         group.items
     ) {
-      try {
-        const assigned =
-          await verifyVariantMedia(
-            admin,
-            {
-              variantId,
+      const mediaId =
+        item.media.id;
 
-              mediaId:
-                item.media.id,
-            }
-          );
+      /*
+       * ------------------------------------------------
+       * Already assigned?
+       * ------------------------------------------------
+       */
 
-        if (
-          assigned
-        ) {
-          console.log(
-            "[IMAGE IMPORT] Already assigned:",
-            {
-              sku:
-                item.sku,
-
-              variantId,
-
-              mediaId:
-                item.media.id,
-            }
-          );
-
-          continue;
-        }
-
-        pendingMedia.push(
-          item
-        );
-
-      } catch (
-        error
+      if (
+        currentMediaIds.has(
+          mediaId
+        )
       ) {
-        /*
-         * If verification fails, keep the media in
-         * the pending list. The actual mutation can
-         * still tell us if assignment is possible.
-         */
-
-        console.warn(
-          "[IMAGE IMPORT] Pre-assignment verification failed:",
+        console.log(
+          "[IMAGE IMPORT] Media already assigned. Skipping:",
           {
+            sku:
+              item.sku,
+
             variantId,
 
-            mediaId:
-              item.media.id,
-
-            error:
-              error?.message,
+            mediaId,
           }
         );
 
-        pendingMedia.push(
-          item
-        );
+        continue;
       }
+
+      pendingMedia.push(
+        item
+      );
     }
 
     if (
@@ -1851,41 +1975,62 @@ async function assignProductMediaBatch(
     }
   }
 
+  // ----------------------------------------------------
+  // NOTHING TO ASSIGN
+  // ----------------------------------------------------
+
   if (
     !pendingVariantGroups.size
   ) {
     console.log(
-      "[IMAGE IMPORT] All media already assigned."
+      "[IMAGE IMPORT] All target media are already assigned."
     );
 
     return true;
   }
 
   // ----------------------------------------------------
-  // Build ONE input per variant
+  // BUILD ONE INPUT PER VARIANT
   // ----------------------------------------------------
 
   const variantMedia =
     Array.from(
       pendingVariantGroups.values()
-    ).map(
-      (
-        group
-      ) => ({
-        variantId:
-          group.variant.id,
+    )
+      .map(
+        (
+          group
+        ) => ({
+          variantId:
+            group.variant.id,
 
-        mediaIds:
-          uniqueIds(
-            group.items.map(
-              (
-                item
-              ) =>
-                item.media.id
-            )
-          ),
-      })
+          mediaIds:
+            uniqueIds(
+              group.items.map(
+                (
+                  item
+                ) =>
+                  item.media.id
+              )
+            ),
+        })
+      )
+      .filter(
+        (
+          input
+        ) =>
+          input.mediaIds.length > 0
+      );
+
+  if (
+    !variantMedia.length
+  ) {
+    console.log(
+      "[IMAGE IMPORT] No new media requires assignment."
     );
+
+    return true;
+  }
 
   /*
    * Safety check.
@@ -1925,7 +2070,7 @@ async function assignProductMediaBatch(
   );
 
   // ----------------------------------------------------
-  // Assign with retries
+  // ASSIGN WITH RETRIES
   // ----------------------------------------------------
 
   let lastError =
@@ -1992,7 +2137,7 @@ async function assignProductMediaBatch(
       );
 
       // ----------------------------------------------
-      // GraphQL errors
+      // GRAPHQL ERRORS
       // ----------------------------------------------
 
       if (
@@ -2021,7 +2166,7 @@ async function assignProductMediaBatch(
       }
 
       // ----------------------------------------------
-      // User errors
+      // USER ERRORS
       // ----------------------------------------------
 
       if (
@@ -2057,7 +2202,7 @@ async function assignProductMediaBatch(
       }
 
       // ----------------------------------------------
-      // Product confirmation
+      // PRODUCT CONFIRMATION
       // ----------------------------------------------
 
       if (
@@ -2068,16 +2213,17 @@ async function assignProductMediaBatch(
         );
       }
 
-      // ----------------------------------------------
-      // Give Shopify time to update the edge
-      // ----------------------------------------------
+      /*
+       * Give Shopify a little time to update the
+       * variant-media relationship.
+       */
 
       await sleep(
         ASSIGN_RETRY_DELAY
       );
 
       // ----------------------------------------------
-      // Verify every media
+      // VERIFY EVERY MEDIA
       // ----------------------------------------------
 
       let allVerified =
@@ -2087,24 +2233,30 @@ async function assignProductMediaBatch(
         const group of
           pendingVariantGroups.values()
       ) {
+        const currentMedia =
+          await getVariantMedia(
+            admin,
+            group.variant.id
+          );
+
+        const currentMediaIds =
+          new Set(
+            currentMedia.map(
+              (
+                media
+              ) =>
+                media.id
+            )
+          );
+
         for (
           const item of
             group.items
         ) {
-          const verified =
-            await verifyVariantMedia(
-              admin,
-              {
-                variantId:
-                  group.variant.id,
-
-                mediaId:
-                  item.media.id,
-              }
-            );
-
           if (
-            !verified
+            !currentMediaIds.has(
+              item.media.id
+            )
           ) {
             allVerified =
               false;
@@ -2161,6 +2313,9 @@ async function assignProductMediaBatch(
 
           error:
             error?.message,
+
+          stack:
+            error?.stack,
         }
       );
     }
@@ -2313,16 +2468,18 @@ function sleep(
   );
 }
 
+// ======================================================
+// HISTORY
+// ======================================================
 
-
-// HISTORY FUNCTION
-
-
-async function saveImportHistory(job) {
+async function saveImportHistory(
+  job
+) {
   try {
     await db.importHistory.create({
       data: {
-        shop: job.shop,
+        shop:
+          job.shop,
 
         driveUrl:
           job.driveUrl || "",
@@ -2331,33 +2488,44 @@ async function saveImportHistory(job) {
           job.status,
 
         startedAt:
-          new Date(job.startedAt),
+          new Date(
+            job.startedAt
+          ),
 
         completedAt:
           job.completedAt
-            ? new Date(job.completedAt)
+            ? new Date(
+                job.completedAt
+              )
             : null,
 
         imagesFound:
-          job.summary?.imagesFound || 0,
+          job.summary?.imagesFound ||
+          0,
 
         variantsMatched:
-          job.summary?.variantsMatched || 0,
+          job.summary?.variantsMatched ||
+          0,
 
         imagesUploaded:
-          job.summary?.imagesUploaded || 0,
+          job.summary?.imagesUploaded ||
+          0,
 
         imagesAssigned:
-          job.summary?.imagesAssigned || 0,
+          job.summary?.imagesAssigned ||
+          0,
 
         skuNotFound:
-          job.summary?.skuNotFound || 0,
+          job.summary?.skuNotFound ||
+          0,
 
         errors:
-          job.summary?.errors || 0,
+          job.summary?.errors ||
+          0,
 
         message:
-          job.message || null,
+          job.message ||
+          null,
 
         errorDetails:
           job.errors?.length
@@ -2371,7 +2539,10 @@ async function saveImportHistory(job) {
     console.log(
       "[IMAGE IMPORT] History saved."
     );
-  } catch (error) {
+
+  } catch (
+    error
+  ) {
     console.error(
       "[IMAGE IMPORT] Failed to save history:",
       error
