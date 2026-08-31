@@ -253,20 +253,10 @@ async function runImportJob({
           sku
         );
 
-      console.log(
-          "[IMAGE IMPORT] SKU MATCH DEBUG:",
-          {
-            filename: file.name,
-            extractedSku: sku,
-            normalizedSku,
-            found: variantMap.has(normalizedSku),
-          }
+      const variant =
+        variantMap.get(
+          normalizedSku
         );
-
-        const variant =
-          variantMap.get(
-            normalizedSku
-          );
 
       if (!variant) {
         job.summary.skuNotFound++;
@@ -1082,17 +1072,6 @@ async function loadAllVariants(
         ?.productVariants
         ?.nodes ||
       [];
-
-    console.log(
-      "[IMAGE IMPORT] Shopify SKU DEBUG:",
-      variants
-        .filter((variant) => variant.sku)
-        .map((variant) => ({
-          id: variant.id,
-          sku: variant.sku,
-          normalizedSku: normalizeSku(variant.sku),
-        }))
-    );
 
     for (
       const variant of
