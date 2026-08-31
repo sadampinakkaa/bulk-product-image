@@ -19,7 +19,7 @@ const JOB_TTL =
 // ------------------------------------------------------
 
 const DOWNLOAD_CONCURRENCY = 3;
-const SHOPIFY_CONCURRENCY = 3;
+const SHOPIFY_CONCURRENCY = 2;
 
 // ------------------------------------------------------
 // Shopify media
@@ -231,10 +231,7 @@ async function runImportJob({
     job.message =
       "Loading Shopify variant SKUs...";
 
-    const {
-      map: variantMap,
-      mediaUsage,
-    } =
+    const variantMap =
       await loadAllVariants(
         admin
       );
@@ -248,7 +245,7 @@ async function runImportJob({
     }
 
     // ==================================================
-    // 3. MATCH FILES TO VARIANTS
+    // 3. MATCH DRIVE FILES TO SHOPIFY VARIANTS
     // ==================================================
 
     const matchedFiles =
@@ -311,7 +308,7 @@ async function runImportJob({
     }
 
     // ==================================================
-    // 4. DOWNLOAD IMAGES
+    // 4. DOWNLOAD DRIVE IMAGES
     // ==================================================
 
     job.message =
@@ -384,7 +381,7 @@ async function runImportJob({
     }
 
     // ==================================================
-    // 5. CREATE OR UPDATE PRODUCT MEDIA
+    // 5. CREATE OR UPDATE SHOPIFY MEDIA
     // ==================================================
 
     job.message =
@@ -398,16 +395,15 @@ async function runImportJob({
           item
         ) => {
           try {
-            const mediaResult =
+            const result =
               await prepareMediaForItem(
                 admin,
-                item,
-                mediaUsage
+                item
               );
 
             if (
-              mediaResult.created ||
-              mediaResult.updated
+              result.created ||
+              result.updated
             ) {
               job.summary.imagesUploaded++;
             }
@@ -416,14 +412,14 @@ async function runImportJob({
               ...item,
 
               media:
-                mediaResult.media,
+                result.media,
 
               mediaAction:
-                mediaResult.action,
+                result.action,
 
               uploaded:
-                mediaResult.created ||
-                mediaResult.updated,
+                result.created ||
+                result.updated,
             };
           } catch (
             error
@@ -457,7 +453,7 @@ async function runImportJob({
     }
 
     // ==================================================
-    // 6. ASSIGN MEDIA TO CORRECT VARIANTS
+    // 6. ASSIGN CORRECT MEDIA TO CORRECT VARIANT
     // ==================================================
 
     job.message =
@@ -471,7 +467,7 @@ async function runImportJob({
           item
         ) => {
           try {
-            await ensureVariantHasOnlyTargetMedia(
+            await ensureVariantMedia(
               admin,
               {
                 productId:
@@ -480,7 +476,7 @@ async function runImportJob({
                 variantId:
                   item.variant.id,
 
-                targetMediaId:
+                mediaId:
                   item.media.id,
 
                 sku:
@@ -497,23 +493,6 @@ async function runImportJob({
           } catch (
             error
           ) {
-            console.error(
-              "[IMAGE IMPORT] Variant assignment failed:",
-              {
-                sku:
-                  item.sku,
-
-                variantId:
-                  item.variant.id,
-
-                mediaId:
-                  item.media.id,
-
-                error:
-                  error?.message,
-              }
-            );
-
             recordError(
               job,
               item.file,
@@ -564,7 +543,9 @@ async function runImportJob({
             }
           );
 
-        if (!verified) {
+        if (
+          !verified
+        ) {
           throw new Error(
             `Shopify did not confirm media ${item.media.id} on variant ${item.variant.id}.`
           );
@@ -573,7 +554,7 @@ async function runImportJob({
         job.summary.imagesAssigned++;
 
         console.log(
-          "[IMAGE IMPORT] FINAL ASSIGNMENT VERIFIED:",
+          "[IMAGE IMPORT] Assignment verified:",
           {
             sku:
               item.sku,
@@ -636,13 +617,12 @@ async function runImportJob({
 }
 
 // ======================================================
-// PREPARE MEDIA
+// PREPARE MEDIA FOR ONE DRIVE IMAGE
 // ======================================================
 
 async function prepareMediaForItem(
   admin,
-  item,
-  mediaUsage
+  item
 ) {
   const {
     variant,
@@ -654,7 +634,7 @@ async function prepareMediaForItem(
     variant.productId;
 
   // ----------------------------------------------------
-  // Get current product media
+  // Read current product media.
   // ----------------------------------------------------
 
   const productMedia =
@@ -668,90 +648,47 @@ async function prepareMediaForItem(
       sku
     );
 
-  const matchingMedia =
-    productMedia
-      .filter(
-        (
-          media
-        ) =>
-          media.mediaContentType ===
-            "IMAGE" &&
-          normalizeSku(
-            media.alt
-          ) ===
-            normalizedSku
-      )
-      .sort(
-        (
-          a,
-          b
-        ) =>
-          new Date(
-            b.createdAt || 0
-          ).getTime() -
-          new Date(
-            a.createdAt || 0
-          ).getTime()
-      );
-
-  let targetMedia =
-    matchingMedia[0] ||
-    null;
-
   // ----------------------------------------------------
-  // If SKU media belongs to another variant too,
-  // DO NOT modify the shared media.
+  // Find an existing product IMAGE with this SKU ALT.
   //
-  // Create a separate media for this SKU instead.
+  // IMPORTANT:
+  // No createdAt is used here.
   // ----------------------------------------------------
 
-  if (
-    targetMedia &&
-    isMediaUsedByAnotherVariant(
-      mediaUsage,
-      targetMedia.id,
-      variant.id
-    )
-  ) {
-    console.warn(
-      "[IMAGE IMPORT] Existing SKU media is shared with another variant. Creating a separate media:",
-      {
-        sku,
-        mediaId:
-          targetMedia.id,
-        variantId:
-          variant.id,
-      }
+  const matchingMedia =
+    productMedia.filter(
+      (
+        media
+      ) =>
+        media.mediaContentType ===
+          "IMAGE" &&
+        normalizeSku(
+          media.alt
+        ) ===
+          normalizedSku
     );
 
-    targetMedia =
-      null;
-  }
-
   // ----------------------------------------------------
-  // EXISTING MEDIA
+  // If an existing media exists, update it.
   // ----------------------------------------------------
 
   if (
-    targetMedia
+    matchingMedia.length
   ) {
+    const existingMedia =
+      matchingMedia[0];
+
     console.log(
-      "[IMAGE IMPORT] Existing SKU media found. Updating in place:",
+      "[IMAGE IMPORT] Existing SKU media found:",
       {
         sku,
 
         mediaId:
-          targetMedia.id,
+          existingMedia.id,
 
         variantId:
           variant.id,
       }
-    );
-
-    // fileUpdate requires the file to be READY.
-    await waitForMediaReady(
-      admin,
-      targetMedia.id
     );
 
     const resourceUrl =
@@ -774,7 +711,7 @@ async function prepareMediaForItem(
         admin,
         {
           mediaId:
-            targetMedia.id,
+            existingMedia.id,
 
           resourceUrl,
 
@@ -786,16 +723,6 @@ async function prepareMediaForItem(
     await waitForMediaReady(
       admin,
       updatedMedia.id
-    );
-
-    console.log(
-      "[IMAGE IMPORT] Existing media updated:",
-      {
-        sku,
-
-        mediaId:
-          updatedMedia.id,
-      }
     );
 
     return {
@@ -814,7 +741,9 @@ async function prepareMediaForItem(
   }
 
   // ----------------------------------------------------
-  // NO EXISTING MEDIA
+  // No existing media.
+  //
+  // Upload and create exactly one new product media.
   // ----------------------------------------------------
 
   console.log(
@@ -841,8 +770,8 @@ async function prepareMediaForItem(
       }
     );
 
-  const createdMedia =
-    await createProductMedia(
+  const media =
+    await createNewProductMedia(
       admin,
       {
         productId,
@@ -852,29 +781,26 @@ async function prepareMediaForItem(
 
         alt:
           sku,
+
+        existingMediaIds:
+          new Set(
+            productMedia.map(
+              (
+                item
+              ) =>
+                item.id
+            )
+          ),
       }
     );
 
   await waitForMediaReady(
     admin,
-    createdMedia.id
-  );
-
-  console.log(
-    "[IMAGE IMPORT] New product media created:",
-    {
-      sku,
-
-      mediaId:
-        createdMedia.id,
-
-      productId,
-    }
+    media.id
   );
 
   return {
-    media:
-      createdMedia,
+    media,
 
     created:
       true,
@@ -888,133 +814,139 @@ async function prepareMediaForItem(
 }
 
 // ======================================================
-// UPDATE EXISTING MEDIA USING fileUpdate
+// GET ALL PRODUCT MEDIA
+// ======================================================
+//
+// IMPORTANT:
+// We NEVER request createdAt directly on `Media`.
+//
+// All MediaImage-specific fields are inside:
+//
+// ... on MediaImage { ... }
+//
+// This avoids:
+// "Field 'createdAt' doesn't exist on type 'Media'"
 // ======================================================
 
-async function updateExistingMedia(
+async function getAllProductMedia(
   admin,
-  {
-    mediaId,
-    resourceUrl,
-    alt,
-  }
+  productId
 ) {
-  const response =
-    await admin.graphql(
-      `#graphql
-      mutation UpdateExistingImage(
-        $files: [FileUpdateInput!]!
-      ) {
-        fileUpdate(
-          files: $files
+  const mediaResults =
+    [];
+
+  let cursor =
+    null;
+
+  while (
+    true
+  ) {
+    const response =
+      await admin.graphql(
+        `#graphql
+        query ProductMediaList(
+          $id: ID!
+          $cursor: String
         ) {
-          files {
+          product(
+            id: $id
+          ) {
             id
-            alt
-            fileStatus
-            ... on MediaImage {
-              status
+
+            media(
+              first: 250
+              after: $cursor
+            ) {
+              nodes {
+                id
+                alt
+                mediaContentType
+                status
+
+                ... on MediaImage {
+                  fileStatus
+                }
+              }
+
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
             }
           }
-
-          userErrors {
-            field
-            message
-            code
-          }
         }
-      }
-      `,
-      {
-        variables: {
-          files: [
-            {
-              id:
-                mediaId,
+        `,
+        {
+          variables: {
+            id:
+              productId,
 
-              originalSource:
-                resourceUrl,
+            cursor,
+          },
+        }
+      );
 
-              alt,
-            },
-          ],
-        },
-      }
+    const json =
+      await response.json();
+
+    if (
+      json.errors?.length
+    ) {
+      throw new Error(
+        json.errors
+          .map(
+            (
+              error
+            ) =>
+              error.message
+          )
+          .join("; ")
+      );
+    }
+
+    const product =
+      json.data?.product;
+
+    if (!product) {
+      throw new Error(
+        `Shopify product ${productId} could not be found.`
+      );
+    }
+
+    const connection =
+      product.media;
+
+    mediaResults.push(
+      ...(connection?.nodes ||
+        [])
     );
 
-  const json =
-    await response.json();
+    if (
+      !connection?.pageInfo
+        ?.hasNextPage
+    ) {
+      break;
+    }
 
-  if (
-    json.errors?.length
-  ) {
-    throw new Error(
-      json.errors
-        .map(
-          (
-            error
-          ) =>
-            error.message
-        )
-        .join("; ")
-    );
+    cursor =
+      connection.pageInfo
+        .endCursor;
   }
 
-  const result =
-    json.data
-      ?.fileUpdate;
-
-  if (
-    result?.userErrors?.length
-  ) {
-    throw new Error(
-      result.userErrors
-        .map(
-          (
-            error
-          ) =>
-            `${
-              error.code
-                ? `[${error.code}] `
-                : ""
-            }${error.message}`
-        )
-        .join("; ")
-    );
-  }
-
-  const updated =
-    result?.files?.[0];
-
-  if (
-    !updated?.id
-  ) {
-    throw new Error(
-      `Shopify did not return the updated media "${mediaId}".`
-    );
-  }
-
-  return updated;
+  return mediaResults;
 }
 
 // ======================================================
 // CREATE NEW PRODUCT MEDIA
 // ======================================================
-//
-// Uses productUpdate because productCreateMedia is
-// deprecated in the current Admin API.
-//
-// productUpdate returns the updated product. We then
-// query product media and identify the newest media
-// with the requested SKU in ALT.
-// ======================================================
 
-async function createProductMedia(
+async function createNewProductMedia(
   admin,
   {
     productId,
     originalSource,
     alt,
+    existingMediaIds,
   }
 ) {
   const response =
@@ -1101,41 +1033,49 @@ async function createProductMedia(
     !result?.product?.id
   ) {
     throw new Error(
-      "Shopify did not return the product after creating media."
+      "Shopify did not confirm product media creation."
     );
   }
 
   // ----------------------------------------------------
-  // Shopify media creation is asynchronous.
-  // Poll product media until the new SKU media appears.
+  // Wait for a NEW media ID.
+  //
+  // We do not identify it using createdAt.
+  // We compare media IDs against the IDs that existed
+  // before the mutation.
   // ----------------------------------------------------
 
-  const media =
-    await waitForNewProductMedia(
-      admin,
-      {
-        productId,
+  return await waitForNewMedia(
+    admin,
+    {
+      productId,
 
-        alt,
-      }
-    );
+      existingMediaIds,
 
-  return media;
+      alt,
+    }
+  );
 }
 
 // ======================================================
-// WAIT FOR NEW PRODUCT MEDIA
+// WAIT FOR NEW MEDIA
 // ======================================================
 
-async function waitForNewProductMedia(
+async function waitForNewMedia(
   admin,
   {
     productId,
+    existingMediaIds,
     alt,
   }
 ) {
   const startedAt =
     Date.now();
+
+  const normalizedAlt =
+    normalizeSku(
+      alt
+    );
 
   while (
     Date.now() -
@@ -1148,55 +1088,48 @@ async function waitForNewProductMedia(
         productId
       );
 
-    const normalizedAlt =
-      normalizeSku(
-        alt
+    // --------------------------------------------------
+    // Only consider:
+    //
+    // 1. IMAGE
+    // 2. matching ALT
+    // 3. ID did not exist before the mutation
+    // --------------------------------------------------
+
+    const newMedia =
+      media.filter(
+        (
+          item
+        ) =>
+          item.mediaContentType ===
+            "IMAGE" &&
+          normalizeSku(
+            item.alt
+          ) ===
+            normalizedAlt &&
+          !existingMediaIds.has(
+            item.id
+          )
       );
 
-    const matching =
-      media
-        .filter(
+    if (
+      newMedia.length
+    ) {
+      // Prefer a READY image if Shopify has already
+      // finished processing it.
+      const ready =
+        newMedia.find(
           (
             item
           ) =>
-            item.mediaContentType ===
-              "IMAGE" &&
-            normalizeSku(
-              item.alt
-            ) ===
-              normalizedAlt
-        )
-        .sort(
-          (
-            a,
-            b
-          ) =>
-            new Date(
-              b.createdAt || 0
-            ).getTime() -
-            new Date(
-              a.createdAt || 0
-            ).getTime()
+            item.status ===
+            "READY"
         );
 
-    if (
-      matching.length
-    ) {
-      const newest =
-        matching[0];
-
-      if (
-        newest.status ===
-          "FAILED" ||
-        newest.fileStatus ===
-          "FAILED"
-      ) {
-        throw new Error(
-          `Shopify failed to process media for SKU "${alt}".`
-        );
-      }
-
-      return newest;
+      return (
+        ready ||
+        newMedia[0]
+      );
     }
 
     await sleep(
@@ -1205,120 +1138,119 @@ async function waitForNewProductMedia(
   }
 
   throw new Error(
-    `Shopify created the product update but the new media could not be located for SKU "${alt}".`
+    `Shopify created the image for SKU "${alt}" but the new media could not be located.`
   );
 }
 
 // ======================================================
-// GET ALL PRODUCT MEDIA
+// UPDATE EXISTING MEDIA
 // ======================================================
 
-async function getAllProductMedia(
+async function updateExistingMedia(
   admin,
-  productId
+  {
+    mediaId,
+    resourceUrl,
+    alt,
+  }
 ) {
-  const results =
-    [];
-
-  let cursor =
-    null;
-
-  while (true) {
-    const response =
-      await admin.graphql(
-        `#graphql
-        query ProductMediaList(
-          $id: ID!
-          $cursor: String
+  const response =
+    await admin.graphql(
+      `#graphql
+      mutation UpdateExistingImage(
+        $files: [FileUpdateInput!]!
+      ) {
+        fileUpdate(
+          files: $files
         ) {
-          product(
-            id: $id
-          ) {
+          files {
             id
+            alt
+            fileStatus
 
-            media(
-              first: 250
-              after: $cursor
-            ) {
-              nodes {
-                id
-                alt
-                mediaContentType
-                status
-                createdAt
-                updatedAt
-
-                ... on MediaImage {
-                  fileStatus
-                }
-              }
-
-              pageInfo {
-                hasNextPage
-                endCursor
-              }
+            ... on MediaImage {
+              status
             }
           }
+
+          userErrors {
+            field
+            message
+            code
+          }
         }
-        `,
-        {
-          variables: {
-            id:
-              productId,
+      }
+      `,
+      {
+        variables: {
+          files: [
+            {
+              id:
+                mediaId,
 
-            cursor,
-          },
-        }
-      );
+              originalSource:
+                resourceUrl,
 
-    const json =
-      await response.json();
-
-    if (
-      json.errors?.length
-    ) {
-      throw new Error(
-        json.errors
-          .map(
-            (
-              error
-            ) =>
-              error.message
-          )
-          .join("; ")
-      );
-    }
-
-    const product =
-      json.data?.product;
-
-    if (!product) {
-      throw new Error(
-        `Shopify product ${productId} could not be found.`
-      );
-    }
-
-    const connection =
-      product.media;
-
-    results.push(
-      ...(connection?.nodes ||
-        [])
+              alt,
+            },
+          ],
+        },
+      }
     );
 
-    if (
-      !connection?.pageInfo
-        ?.hasNextPage
-    ) {
-      break;
-    }
+  const json =
+    await response.json();
 
-    cursor =
-      connection.pageInfo
-        .endCursor;
+  if (
+    json.errors?.length
+  ) {
+    throw new Error(
+      json.errors
+        .map(
+          (
+            error
+          ) =>
+            error.message
+        )
+        .join("; ")
+    );
   }
 
-  return results;
+  const result =
+    json.data
+      ?.fileUpdate;
+
+  if (
+    result?.userErrors?.length
+  ) {
+    throw new Error(
+      result.userErrors
+        .map(
+          (
+            error
+          ) =>
+            `${
+              error.code
+                ? `[${error.code}] `
+                : ""
+            }${error.message}`
+        )
+        .join("; ")
+    );
+  }
+
+  const updated =
+    result?.files?.[0];
+
+  if (
+    !updated?.id
+  ) {
+    throw new Error(
+      `Shopify did not return the updated media ${mediaId}.`
+    );
+  }
+
+  return updated;
 }
 
 // ======================================================
@@ -1331,13 +1263,12 @@ async function loadAllVariants(
   const map =
     new Map();
 
-  const mediaUsage =
-    new Map();
-
   let cursor =
     null;
 
-  while (true) {
+  while (
+    true
+  ) {
     const response =
       await admin.graphql(
         `#graphql
@@ -1350,26 +1281,10 @@ async function loadAllVariants(
           ) {
             nodes {
               id
-
               sku
 
               product {
                 id
-              }
-
-              media(
-                first: 250
-              ) {
-                nodes {
-                  id
-                  alt
-                  mediaContentType
-                  status
-
-                  ... on MediaImage {
-                    fileStatus
-                  }
-                }
               }
             }
 
@@ -1433,7 +1348,7 @@ async function loadAllVariants(
         )
       ) {
         console.warn(
-          "[IMAGE IMPORT] Duplicate Shopify SKU detected:",
+          "[IMAGE IMPORT] Duplicate Shopify SKU:",
           {
             sku:
               variant.sku,
@@ -1451,39 +1366,6 @@ async function loadAllVariants(
         continue;
       }
 
-      const variantMedia =
-        variant.media
-          ?.nodes ||
-        [];
-
-      // ------------------------------------------------
-      // Track which variants use each media ID.
-      // ------------------------------------------------
-
-      for (
-        const media of
-          variantMedia
-      ) {
-        if (
-          !mediaUsage.has(
-            media.id
-          )
-        ) {
-          mediaUsage.set(
-            media.id,
-            new Set()
-          );
-        }
-
-        mediaUsage
-          .get(
-            media.id
-          )
-          .add(
-            variant.id
-          );
-      }
-
       map.set(
         normalizedSku,
         {
@@ -1495,9 +1377,6 @@ async function loadAllVariants(
 
           sku:
             variant.sku,
-
-          media:
-            variantMedia,
         }
       );
     }
@@ -1522,61 +1401,19 @@ async function loadAllVariants(
     map.size
   );
 
-  console.log(
-    "[IMAGE IMPORT] Shopify media usage map:",
-    mediaUsage.size
-  );
-
-  return {
-    map,
-
-    mediaUsage,
-  };
+  return map;
 }
 
 // ======================================================
-// CHECK IF MEDIA IS USED BY ANOTHER VARIANT
+// ENSURE CORRECT MEDIA IS ASSIGNED TO VARIANT
 // ======================================================
 
-function isMediaUsedByAnotherVariant(
-  mediaUsage,
-  mediaId,
-  currentVariantId
-) {
-  const users =
-    mediaUsage.get(
-      mediaId
-    );
-
-  if (!users) {
-    return false;
-  }
-
-  for (
-    const variantId of
-      users
-  ) {
-    if (
-      variantId !==
-      currentVariantId
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-// ======================================================
-// ENSURE VARIANT HAS TARGET MEDIA
-// ======================================================
-
-async function ensureVariantHasOnlyTargetMedia(
+async function ensureVariantMedia(
   admin,
   {
     productId,
     variantId,
-    targetMediaId,
+    mediaId,
     sku,
   }
 ) {
@@ -1591,15 +1428,13 @@ async function ensureVariantHasOnlyTargetMedia(
   ) {
     try {
       console.log(
-        `[IMAGE IMPORT] Variant assignment ${attempt}/${ASSIGN_MAX_RETRIES}:`,
+        `[IMAGE IMPORT] Assignment attempt ${attempt}/${ASSIGN_MAX_RETRIES}:`,
         {
           sku,
 
-          productId,
-
           variantId,
 
-          targetMediaId,
+          mediaId,
         }
       );
 
@@ -1631,23 +1466,22 @@ async function ensureVariantHasOnlyTargetMedia(
         );
 
       // ------------------------------------------------
-      // Already correct.
+      // CORRECT MEDIA ALREADY ASSIGNED
       // ------------------------------------------------
 
       if (
         currentMediaIds.includes(
-          targetMediaId
+          mediaId
         )
       ) {
         console.log(
-          "[IMAGE IMPORT] Target media is already assigned:",
+          "[IMAGE IMPORT] Correct media already assigned:",
           {
             sku,
 
             variantId,
 
-            mediaId:
-              targetMediaId,
+            mediaId,
           }
         );
 
@@ -1655,29 +1489,23 @@ async function ensureVariantHasOnlyTargetMedia(
       }
 
       // ------------------------------------------------
-      // IMPORTANT:
-      //
-      // Shopify can reject append when a variant
-      // already has media.
-      //
-      // Detach existing media first.
+      // REMOVE EXISTING MEDIA
       // ------------------------------------------------
 
       if (
         currentMediaIds.length
       ) {
         console.log(
-          "[IMAGE IMPORT] Existing variant media detected. Detaching before assignment:",
+          "[IMAGE IMPORT] Removing existing variant media:",
           {
             sku,
 
             variantId,
 
-            existingMedia:
-              currentMediaIds,
+            currentMediaIds,
 
-            targetMedia:
-              targetMediaId,
+            newMediaId:
+              mediaId,
           }
         );
 
@@ -1705,7 +1533,7 @@ async function ensureVariantHasOnlyTargetMedia(
       }
 
       // ------------------------------------------------
-      // Append ONLY the target media.
+      // ADD CORRECT MEDIA
       // ------------------------------------------------
 
       await appendVariantMedia(
@@ -1715,13 +1543,12 @@ async function ensureVariantHasOnlyTargetMedia(
 
           variantId,
 
-          mediaId:
-            targetMediaId,
+          mediaId,
         }
       );
 
       // ------------------------------------------------
-      // Verify.
+      // VERIFY
       // ------------------------------------------------
 
       const verified =
@@ -1730,8 +1557,7 @@ async function ensureVariantHasOnlyTargetMedia(
           {
             variantId,
 
-            mediaId:
-              targetMediaId,
+            mediaId,
           }
         );
 
@@ -1739,14 +1565,13 @@ async function ensureVariantHasOnlyTargetMedia(
         verified
       ) {
         console.log(
-          "[IMAGE IMPORT] Variant assignment successful:",
+          "[IMAGE IMPORT] Assignment successful:",
           {
             sku,
 
             variantId,
 
-            mediaId:
-              targetMediaId,
+            mediaId,
           }
         );
 
@@ -1754,7 +1579,7 @@ async function ensureVariantHasOnlyTargetMedia(
       }
 
       throw new Error(
-        `Shopify accepted the media assignment but variant ${variantId} does not yet show media ${targetMediaId}.`
+        `Shopify accepted the assignment but media ${mediaId} is not yet attached to variant ${variantId}.`
       );
     } catch (
       error
@@ -1763,15 +1588,13 @@ async function ensureVariantHasOnlyTargetMedia(
         error;
 
       console.error(
-        "[IMAGE IMPORT] Assignment attempt failed:",
+        "[IMAGE IMPORT] Assignment failed:",
         {
           sku,
 
-          productId,
-
           variantId,
 
-          targetMediaId,
+          mediaId,
 
           attempt,
 
@@ -1780,37 +1603,21 @@ async function ensureVariantHasOnlyTargetMedia(
         }
       );
 
-      // ------------------------------------------------
-      // If Shopify says the variant already has media,
-      // re-read the variant and retry the detach/append
-      // sequence.
-      // ------------------------------------------------
-
       if (
-        isVariantAlreadyHasMediaError(
-          error
-        )
+        attempt <
+        ASSIGN_MAX_RETRIES
       ) {
-        console.warn(
-          "[IMAGE IMPORT] Shopify reports that the variant already has media. Retrying with a fresh variant state."
+        await sleep(
+          ASSIGN_RETRY_DELAY
         );
       }
-    }
-
-    if (
-      attempt <
-      ASSIGN_MAX_RETRIES
-    ) {
-      await sleep(
-        ASSIGN_RETRY_DELAY
-      );
     }
   }
 
   throw (
     lastError ||
     new Error(
-      `Unable to assign media ${targetMediaId} to variant ${variantId}.`
+      `Unable to assign media ${mediaId} to variant ${variantId}.`
     )
   );
 }
@@ -1826,7 +1633,7 @@ async function getVariantMedia(
   const response =
     await admin.graphql(
       `#graphql
-      query VerifyVariantMedia(
+      query GetVariantMedia(
         $id: ID!
       ) {
         productVariant(
@@ -1896,8 +1703,13 @@ async function detachVariantMedia(
     mediaIds,
   }
 ) {
+  const cleanMediaIds =
+    uniqueIds(
+      mediaIds
+    );
+
   if (
-    !mediaIds?.length
+    !cleanMediaIds.length
   ) {
     return;
   }
@@ -1905,7 +1717,7 @@ async function detachVariantMedia(
   const response =
     await admin.graphql(
       `#graphql
-      mutation ProductVariantDetachMedia(
+      mutation DetachVariantMedia(
         $productId: ID!
         $variantMedia: [ProductVariantDetachMediaInput!]!
       ) {
@@ -1938,9 +1750,7 @@ async function detachVariantMedia(
               variantId,
 
               mediaIds:
-                uniqueIds(
-                  mediaIds
-                ),
+                cleanMediaIds,
             },
           ],
         },
@@ -1988,22 +1798,15 @@ async function detachVariantMedia(
     );
   }
 
-  if (
-    !result?.product?.id
-  ) {
-    throw new Error(
-      "Shopify did not confirm the variant media detach operation."
-    );
-  }
-
   console.log(
-    "[IMAGE IMPORT] Variant media detached:",
+    "[IMAGE IMPORT] Detached variant media:",
     {
       productId,
 
       variantId,
 
-      mediaIds,
+      mediaIds:
+        cleanMediaIds,
     }
   );
 }
@@ -2023,7 +1826,7 @@ async function appendVariantMedia(
   const response =
     await admin.graphql(
       `#graphql
-      mutation ProductVariantAppendMedia(
+      mutation AppendVariantMedia(
         $productId: ID!
         $variantMedia: [ProductVariantAppendMediaInput!]!
       ) {
@@ -2086,9 +1889,7 @@ async function appendVariantMedia(
     json.data
       ?.productVariantAppendMedia;
 
-  if (
-    !result
-  ) {
+  if (!result) {
     throw new Error(
       "Shopify returned no productVariantAppendMedia response."
     );
@@ -2117,12 +1918,12 @@ async function appendVariantMedia(
     !result.product?.id
   ) {
     throw new Error(
-      "Shopify did not confirm the product after variant media assignment."
+      "Shopify did not confirm the variant media assignment."
     );
   }
 
   console.log(
-    "[IMAGE IMPORT] Variant media appended:",
+    "[IMAGE IMPORT] Media appended:",
     {
       productId,
 
@@ -2134,7 +1935,7 @@ async function appendVariantMedia(
 }
 
 // ======================================================
-// WAIT FOR VARIANT MEDIA ASSIGNMENT
+// WAIT UNTIL VARIANT MEDIA IS ASSIGNED
 // ======================================================
 
 async function waitForVariantMediaAssignment(
@@ -2160,7 +1961,7 @@ async function waitForVariantMediaAssignment(
 
     if (!variant) {
       throw new Error(
-        `Shopify variant ${variantId} could not be found during verification.`
+        `Variant ${variantId} could not be found.`
       );
     }
 
@@ -2190,7 +1991,7 @@ async function waitForVariantMediaAssignment(
 }
 
 // ======================================================
-// WAIT UNTIL MEDIA IS DETACHED
+// WAIT UNTIL OLD MEDIA IS DETACHED
 // ======================================================
 
 async function waitForVariantMediaDetached(
@@ -2221,22 +2022,22 @@ async function waitForVariantMediaDetached(
 
     if (!variant) {
       throw new Error(
-        `Shopify variant ${variantId} could not be found while verifying media removal.`
+        `Variant ${variantId} could not be found.`
       );
     }
 
-    const current =
+    const currentMedia =
       variant.media
         ?.nodes ||
       [];
 
     const stillAttached =
-      current.some(
+      currentMedia.some(
         (
-          item
+          media
         ) =>
           ids.has(
-            item.id
+            media.id
           )
       );
 
@@ -2252,7 +2053,7 @@ async function waitForVariantMediaDetached(
   }
 
   throw new Error(
-    `Shopify did not remove the previous media from variant ${variantId}.`
+    `Shopify did not detach the previous media from variant ${variantId}.`
   );
 }
 
@@ -2370,169 +2171,6 @@ async function waitForMediaReady(
 }
 
 // ======================================================
-// CREATE STAGED UPLOAD
-// ======================================================
-
-async function createStagedUpload(
-  admin,
-  {
-    filename,
-    mimeType,
-    buffer,
-  }
-) {
-  const response =
-    await admin.graphql(
-      `#graphql
-      mutation StagedUpload(
-        $input: [StagedUploadInput!]!
-      ) {
-        stagedUploadsCreate(
-          input: $input
-        ) {
-          stagedTargets {
-            url
-            resourceUrl
-
-            parameters {
-              name
-              value
-            }
-          }
-
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-      `,
-      {
-        variables: {
-          input: [
-            {
-              filename,
-
-              mimeType,
-
-              httpMethod:
-                "POST",
-
-              resource:
-                "PRODUCT_IMAGE",
-            },
-          ],
-        },
-      }
-    );
-
-  const json =
-    await response.json();
-
-  if (
-    json.errors?.length
-  ) {
-    throw new Error(
-      json.errors
-        .map(
-          (
-            error
-          ) =>
-            error.message
-        )
-        .join("; ")
-    );
-  }
-
-  const result =
-    json.data
-      ?.stagedUploadsCreate;
-
-  if (
-    result?.userErrors?.length
-  ) {
-    throw new Error(
-      result.userErrors
-        .map(
-          (
-            error
-          ) =>
-            error.message
-        )
-        .join("; ")
-    );
-  }
-
-  const target =
-    result?.stagedTargets?.[0];
-
-  if (!target) {
-    throw new Error(
-      "Shopify did not return an upload target."
-    );
-  }
-
-  const formData =
-    new FormData();
-
-  for (
-    const parameter of
-      target.parameters ||
-      []
-  ) {
-    formData.append(
-      parameter.name,
-      parameter.value
-    );
-  }
-
-  formData.append(
-    "file",
-    new Blob(
-      [buffer],
-      {
-        type:
-          mimeType,
-      }
-    ),
-    filename
-  );
-
-  const uploadResponse =
-    await fetch(
-      target.url,
-      {
-        method:
-          "POST",
-
-        body:
-          formData,
-      }
-    );
-
-  if (
-    !uploadResponse.ok
-  ) {
-    const text =
-      await uploadResponse.text();
-
-    throw new Error(
-      `Shopify staged upload failed: ${text}`
-    );
-  }
-
-  if (
-    !target.resourceUrl
-  ) {
-    throw new Error(
-      "Shopify did not return a staged resource URL."
-    );
-  }
-
-  return target.resourceUrl;
-}
-
-// ======================================================
 // DEDUPLICATE DRIVE FILES
 // ======================================================
 
@@ -2565,130 +2203,6 @@ function deduplicateDriveFiles(
   return Array.from(
     unique.values()
   );
-}
-
-// ======================================================
-// FINISH JOB
-// ======================================================
-
-function finishJob(
-  job,
-  startTime
-) {
-  job.progress.processed =
-    job.progress.total;
-
-  job.progress.estimatedSeconds =
-    0;
-
-  job.summary.errors =
-    job.errors.length;
-
-  if (
-    job.summary.errors > 0
-  ) {
-    job.status =
-      "completed_with_errors";
-
-    job.message =
-      `Import finished with ${job.summary.errors} error(s). ${job.summary.imagesAssigned} image(s) were assigned to variants.`;
-  } else {
-    job.status =
-      "completed";
-
-    job.message =
-      `Import completed successfully. ${job.summary.imagesAssigned} image(s) were assigned to variants.`;
-  }
-
-  job.completedAt =
-    new Date().toISOString();
-
-  saveImportHistory(
-    job
-  ).catch(
-    (
-      error
-    ) =>
-      console.error(
-        "[IMAGE IMPORT] History save error:",
-        error
-      )
-  );
-
-  console.log(
-    "[IMAGE IMPORT] JOB FINISHED:",
-    {
-      status:
-        job.status,
-
-      imagesFound:
-        job.summary.imagesFound,
-
-      matched:
-        job.summary.variantsMatched,
-
-      uploaded:
-        job.summary.imagesUploaded,
-
-      assigned:
-        job.summary.imagesAssigned,
-
-      errors:
-        job.summary.errors,
-
-      elapsedSeconds:
-        Math.round(
-          (
-            Date.now() -
-            startTime
-          ) / 1000
-        ),
-    }
-  );
-}
-
-// ======================================================
-// RECORD ERROR
-// ======================================================
-
-function recordError(
-  job,
-  file,
-  sku,
-  error
-) {
-  const message =
-    error?.message ||
-    "Unknown error.";
-
-  console.error(
-    "[IMAGE IMPORT] ERROR:",
-    {
-      file:
-        file?.name,
-
-      sku,
-
-      message,
-
-      stack:
-        error?.stack,
-    }
-  );
-
-  job.errors.push({
-    file:
-      file?.name ||
-      "Unknown file",
-
-    sku:
-      sku ||
-      getSkuFromFilename(
-        file?.name
-      ),
-
-    message,
-  });
 }
 
 // ======================================================
@@ -2781,29 +2295,6 @@ function normalizeSku(
 }
 
 // ======================================================
-// SHOPIFY ALREADY HAS MEDIA ERROR
-// ======================================================
-
-function isVariantAlreadyHasMediaError(
-  error
-) {
-  const message =
-    String(
-      error?.message ||
-        ""
-    ).toLowerCase();
-
-  return (
-    message.includes(
-      "already has media"
-    ) ||
-    message.includes(
-      "product_variant_already_has_media"
-    )
-  );
-}
-
-// ======================================================
 // SLEEP
 // ======================================================
 
@@ -2822,7 +2313,132 @@ function sleep(
 }
 
 // ======================================================
-// HISTORY
+// FINISH JOB
+// ======================================================
+
+function finishJob(
+  job,
+  startTime
+) {
+  job.progress.processed =
+    job.progress.total;
+
+  job.progress.estimatedSeconds =
+    0;
+
+  job.summary.errors =
+    job.errors.length;
+
+  if (
+    job.summary.errors > 0
+  ) {
+    job.status =
+      "completed_with_errors";
+
+    job.message =
+      `Import finished with ${job.summary.errors} error(s). ${job.summary.imagesAssigned} image(s) were assigned to variants.`;
+  } else {
+    job.status =
+      "completed";
+
+    job.message =
+      `Import completed successfully. ${job.summary.imagesAssigned} image(s) were assigned to variants.`;
+  }
+
+  job.completedAt =
+    new Date().toISOString();
+
+  saveImportHistory(
+    job
+  ).catch(
+    (
+      error
+    ) => {
+      console.error(
+        "[IMAGE IMPORT] History save error:",
+        error
+      );
+    }
+  );
+
+  console.log(
+    "[IMAGE IMPORT] JOB FINISHED:",
+    {
+      status:
+        job.status,
+
+      imagesFound:
+        job.summary.imagesFound,
+
+      matched:
+        job.summary.variantsMatched,
+
+      uploaded:
+        job.summary.imagesUploaded,
+
+      assigned:
+        job.summary.imagesAssigned,
+
+      errors:
+        job.summary.errors,
+
+      elapsedSeconds:
+        Math.round(
+          (
+            Date.now() -
+            startTime
+          ) / 1000
+        ),
+    }
+  );
+}
+
+// ======================================================
+// RECORD ERROR
+// ======================================================
+
+function recordError(
+  job,
+  file,
+  sku,
+  error
+) {
+  const message =
+    error?.message ||
+    "Unknown error.";
+
+  console.error(
+    "[IMAGE IMPORT] ERROR:",
+    {
+      file:
+        file?.name,
+
+      sku,
+
+      message,
+
+      stack:
+        error?.stack,
+    }
+  );
+
+  job.errors.push({
+    file:
+      file?.name ||
+      "Unknown file",
+
+    sku:
+      sku ||
+      getSkuFromFilename(
+        file?.name
+      ),
+
+    message,
+  });
+}
+
+// ======================================================
+// SAVE HISTORY
 // ======================================================
 
 async function saveImportHistory(
