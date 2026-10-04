@@ -316,7 +316,7 @@ export default function Dashboard() {
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState(null);
 
-  // Plan simulator state (Starter $24.99 vs Pro $49.99)
+  // Plan simulator state (Starter $4.99 vs Growth $10.99 vs Pro $19.99)
   const [selectedPlan, setSelectedPlan] = useState("starter");
   const [testSkuInput, setTestSkuInput] = useState("TSHIRT-BLK-M.jpg");
 
@@ -536,20 +536,39 @@ export default function Dashboard() {
             <div className="vis-tier-pill">
               <div className="vis-tier-title">PLAN TIER (PREVIEW)</div>
               <div className="vis-tier-name">
-                {selectedPlan === "starter" ? "Starter Plan" : "Pro Plan"}
+                {selectedPlan === "starter"
+                  ? "Starter Plan"
+                  : selectedPlan === "growth"
+                  ? "Growth Plan"
+                  : "Pro Plan"}
               </div>
               <div className="vis-tier-price">
-                {selectedPlan === "starter" ? "$24.99" : "$49.99"}
+                {selectedPlan === "starter"
+                  ? "$4.99"
+                  : selectedPlan === "growth"
+                  ? "$10.99"
+                  : "$19.99"}
                 <span>/mo</span>
               </div>
               <button
                 type="button"
                 className="vis-tier-toggle-btn"
                 onClick={() =>
-                  setSelectedPlan(selectedPlan === "starter" ? "pro" : "starter")
+                  setSelectedPlan(
+                    selectedPlan === "starter"
+                      ? "growth"
+                      : selectedPlan === "growth"
+                      ? "pro"
+                      : "starter",
+                  )
                 }
               >
-                Preview {selectedPlan === "starter" ? "Pro ($49.99)" : "Starter ($24.99)"}
+                Preview{" "}
+                {selectedPlan === "starter"
+                  ? "Growth ($10.99)"
+                  : selectedPlan === "growth"
+                  ? "Pro ($19.99)"
+                  : "Starter ($4.99)"}
               </button>
               <div className="vis-tier-subnote">UI Placeholder · Billing Inactive</div>
             </div>
@@ -703,20 +722,57 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* 10. PLAN & USAGE CARD (STARTER $24.99 / PRO $49.99 - UI PLACEHOLDER) */}
+          {/* 10. PLAN & USAGE CARD (STARTER $4.99 / GROWTH $10.99 / PRO $19.99 - UI PLACEHOLDER) */}
           <div className="vis-card vis-plan-card">
+            {/* Interactive Tier Switcher Tabs */}
+            <div className="vis-plan-tier-tabs">
+              <button
+                type="button"
+                className={`vis-plan-tab-btn ${selectedPlan === "starter" ? "active" : ""}`}
+                onClick={() => setSelectedPlan("starter")}
+              >
+                Starter ($4.99)
+              </button>
+              <button
+                type="button"
+                className={`vis-plan-tab-btn ${selectedPlan === "growth" ? "active" : ""}`}
+                onClick={() => setSelectedPlan("growth")}
+              >
+                Growth ($10.99)
+              </button>
+              <button
+                type="button"
+                className={`vis-plan-tab-btn ${selectedPlan === "pro" ? "active" : ""}`}
+                onClick={() => setSelectedPlan("pro")}
+              >
+                Pro ($19.99)
+              </button>
+            </div>
+
             <div className="vis-plan-header">
               <div>
                 <span className="vis-plan-badge">
-                  {selectedPlan === "starter" ? "STARTER TIER (UI PLACEHOLDER)" : "PRO ENTERPRISE (UI PLACEHOLDER)"}
+                  {selectedPlan === "starter"
+                    ? "STARTER TIER (UI PLACEHOLDER)"
+                    : selectedPlan === "growth"
+                    ? "GROWTH TIER (UI PLACEHOLDER)"
+                    : "PRO ENTERPRISE (UI PLACEHOLDER)"}
                 </span>
                 <h3 className="vis-plan-title">
-                  {selectedPlan === "starter" ? "Starter Sync Plan" : "Pro Enterprise Plan"}
+                  {selectedPlan === "starter"
+                    ? "Starter Sync Plan"
+                    : selectedPlan === "growth"
+                    ? "Growth Sync Plan"
+                    : "Pro Enterprise Plan"}
                 </h3>
               </div>
               <div className="vis-plan-price-tag">
                 <div className="vis-plan-price-val">
-                  {selectedPlan === "starter" ? "$24.99" : "$49.99"}
+                  {selectedPlan === "starter"
+                    ? "$4.99"
+                    : selectedPlan === "growth"
+                    ? "$10.99"
+                    : "$19.99"}
                 </div>
                 <div className="vis-plan-period">per month (placeholder)</div>
               </div>
@@ -728,7 +784,9 @@ export default function Dashboard() {
                 <span>Store Synced Images (Assigned Total)</span>
                 <strong>
                   {selectedPlan === "starter"
-                    ? `${(historicalStats.totalAssigned || 0).toLocaleString()} / 3,000 tier limit`
+                    ? `${(historicalStats.totalAssigned || 0).toLocaleString()} / 1,000 tier limit`
+                    : selectedPlan === "growth"
+                    ? `${(historicalStats.totalAssigned || 0).toLocaleString()} / 5,000 tier limit`
                     : `${(historicalStats.totalAssigned || 0).toLocaleString()} / Unlimited`}
                 </strong>
               </div>
@@ -738,7 +796,9 @@ export default function Dashboard() {
                   style={{
                     width:
                       selectedPlan === "starter"
-                        ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 3000) * 100))}%`
+                        ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 1000) * 100))}%`
+                        : selectedPlan === "growth"
+                        ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 5000) * 100))}%`
                         : "100%",
                   }}
                 ></div>
@@ -746,7 +806,9 @@ export default function Dashboard() {
               <div className="vis-usage-meta">
                 <span>
                   {selectedPlan === "starter"
-                    ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 3000) * 100))}% of Starter capacity`
+                    ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 1000) * 100))}% of Starter capacity`
+                    : selectedPlan === "growth"
+                    ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 5000) * 100))}% of Growth capacity`
                     : "Unmetered volume on Pro tier"}
                 </span>
                 <span>UI Preview · Billing inactive</span>
@@ -768,12 +830,14 @@ export default function Dashboard() {
               </div>
               <div className="vis-feat-item">
                 <span className="vis-check">
-                  {selectedPlan === "pro" ? "✓" : "✦"}
+                  {selectedPlan === "pro" ? "✓" : selectedPlan === "growth" ? "✓" : "✦"}
                 </span>
                 <span className={selectedPlan === "starter" ? "vis-feat-locked" : ""}>
                   {selectedPlan === "pro"
                     ? "Priority concurrent processing queue"
-                    : "Priority processing (Pro feature)"}
+                    : selectedPlan === "growth"
+                    ? "Accelerated queue processing"
+                    : "Priority processing (Growth / Pro feature)"}
                 </span>
               </div>
             </div>
@@ -783,12 +847,20 @@ export default function Dashboard() {
                 type="button"
                 className="vis-plan-upgrade-btn"
                 onClick={() =>
-                  setSelectedPlan(selectedPlan === "starter" ? "pro" : "starter")
+                  setSelectedPlan(
+                    selectedPlan === "starter"
+                      ? "growth"
+                      : selectedPlan === "growth"
+                      ? "pro"
+                      : "starter",
+                  )
                 }
               >
                 {selectedPlan === "starter"
-                  ? "Preview Pro Tier ($49.99/mo)"
-                  : "Preview Starter Tier ($24.99/mo)"}
+                  ? "Preview Growth Tier ($10.99/mo)"
+                  : selectedPlan === "growth"
+                  ? "Preview Pro Tier ($19.99/mo)"
+                  : "Preview Starter Tier ($4.99/mo)"}
               </button>
               <div className="vis-plan-note">
                 UI structure prepared for future billing integration. No charges applied.
@@ -2024,6 +2096,40 @@ export default function Dashboard() {
               justify-content: space-between;
               border: 1px solid var(--vis-border-gold);
               background: linear-gradient(180deg, rgba(23, 28, 41, 0.95) 0%, rgba(14, 18, 27, 0.95) 100%);
+            }
+
+            .vis-plan-tier-tabs {
+              display: flex;
+              gap: 6px;
+              margin-bottom: 16px;
+              background: rgba(10, 12, 18, 0.6);
+              border: 1px solid var(--vis-border-subtle);
+              border-radius: 8px;
+              padding: 3px;
+            }
+
+            .vis-plan-tab-btn {
+              flex: 1;
+              padding: 6px 8px;
+              font-size: 11px;
+              font-weight: 700;
+              border-radius: 6px;
+              border: 1px solid transparent;
+              background: transparent;
+              color: var(--vis-text-secondary);
+              cursor: pointer;
+              transition: all 0.2s;
+              text-align: center;
+            }
+
+            .vis-plan-tab-btn:hover {
+              color: var(--vis-gold-bright);
+            }
+
+            .vis-plan-tab-btn.active {
+              background: rgba(212, 175, 55, 0.16);
+              border-color: var(--vis-border-gold);
+              color: var(--vis-gold-bright);
             }
 
             .vis-plan-header {
