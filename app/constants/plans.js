@@ -100,6 +100,85 @@ export const PLANS = {
 
 export const DEFAULT_PLAN_ID = PLAN_IDS.STARTER;
 
+// Safe environment variable accessor (safe across Node SSR and client bundles)
+const getEnvVar = (name, fallback) => {
+  if (typeof process !== "undefined" && process?.env && process.env[name]) {
+    return process.env[name];
+  }
+  return fallback;
+};
+
+// ============================================================================
+// SHOPIFY APP PRICING INTEGRATION & PLAN HANDLE MAPPING (PHASE 3)
+// ============================================================================
+// Maps internal plan IDs to external Shopify Partner Dashboard plan handles.
+// Configured centrally via environment variables or safe defaults.
+// ============================================================================
+
+export const SHOPIFY_PLAN_HANDLES = {
+  [PLAN_IDS.STARTER]: getEnvVar("SHOPIFY_PLAN_HANDLE_STARTER", "starter"),
+  [PLAN_IDS.GROWTH]: getEnvVar("SHOPIFY_PLAN_HANDLE_GROWTH", "growth"),
+  [PLAN_IDS.PRO]: getEnvVar("SHOPIFY_PLAN_HANDLE_PRO", "pro"),
+};
+
+/**
+ * Maps a Shopify plan handle, title, or line item identifier to an internal PLAN_ID.
+ * Case-insensitive and resilient to suffix variations (e.g. 'starter_monthly', 'growth-tier').
+ * Returns null if the handle cannot be safely mapped.
+ */
+export function mapShopifyHandleToPlanId(rawHandle) {
+  if (!rawHandle || typeof rawHandle !== "string") return null;
+  const normalized = rawHandle.trim().toLowerCase();
+
+  const starterConfig = getEnvVar("SHOPIFY_PLAN_HANDLE_STARTER", "starter").toLowerCase();
+  const growthConfig = getEnvVar("SHOPIFY_PLAN_HANDLE_GROWTH", "growth").toLowerCase();
+  const proConfig = getEnvVar("SHOPIFY_PLAN_HANDLE_PRO", "pro").toLowerCase();
+
+  // 1. Exact configured handle match
+  if (normalized === starterConfig) return PLAN_IDS.STARTER;
+  if (normalized === growthConfig) return PLAN_IDS.GROWTH;
+  if (normalized === proConfig) return PLAN_IDS.PRO;
+
+  // 2. Resilient token matching for standard plan naming conventions
+  if (/(^|[-_])(pro|professional)([-_]|$)/i.test(normalized)) {
+    return PLAN_IDS.PRO;
+  }
+  if (/(^|[-_])(growth)([-_]|$)/i.test(normalized)) {
+    return PLAN_IDS.GROWTH;
+  }
+  if (/(^|[-_])(starter|basic)([-_]|$)/i.test(normalized)) {
+    return PLAN_IDS.STARTER;
+  }
+
+  return null;
+}
+
+/**
+ * Dynamically constructs the official Shopify-hosted App Pricing selection URL.
+ * Pattern: https://admin.shopify.com/store/:store_handle/charges/:app_handle/pricing_plans
+ *
+ * @param {Object} options
+ * @param {string} options.shop - The merchant shop domain (e.g. 'my-store.myshopify.com' or admin URL)
+ * @param {string} [options.appHandle] - The app's public listing handle from Partner Dashboard
+ * @returns {string|null} The fully-qualified Shopify Admin URL
+ */
+export function getShopifyPricingPlansUrl({ shop, appHandle = null }) {
+  if (!shop || typeof shop !== "string") return null;
+
+  // Clean and extract store handle
+  let cleanShop = shop.trim();
+  cleanShop = cleanShop.replace(/^https?:\/\//i, "");
+  cleanShop = cleanShop.replace(/^admin\.shopify\.com\/store\//i, "");
+  cleanShop = cleanShop.replace(/\.myshopify\.com.*$/i, "");
+  cleanShop = cleanShop.replace(/\/.*$/, "");
+
+  const effectiveAppHandle =
+    appHandle ||
+    getEnvVar("SHOPIFY_APP_HANDLE", "variant-image-sync");
+
+  return `https://admin.shopify.com/store/${encodeURIComponent(cleanShop)}/charges/${encodeURIComponent(effectiveAppHandle)}/pricing_plans`;
+}
+
 // ============================================================================
 // FEATURE IDENTIFIERS & PERMISSIONS MATRIX
 // ============================================================================

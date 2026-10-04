@@ -39,6 +39,7 @@ export const loader = async ({
   try {
     const {
       session,
+      admin,
     } = await authenticate.admin(
       request
     );
@@ -65,7 +66,7 @@ export const loader = async ({
           id: true,
         },
       }),
-      getStorePlanStatus(shop, request),
+      getStorePlanStatus(shop, request, admin),
     ]);
 
     return Response.json({
@@ -214,6 +215,7 @@ export const action = async ({
         shop: session.shop,
         driveUrl,
         request,
+        admin,
       });
 
     if (!preflight.ok) {
@@ -862,14 +864,27 @@ export default function Dashboard() {
                       {preflightData.message}
                     </p>
                     <div className="vis-preflight-cta-row">
-                      <button
-                        type="button"
-                        className="vis-preflight-upgrade-btn"
-                        onClick={() => navigate("/app/settings")}
-                      >
-                        ⚡ Upgrade to {preflightData.quota.upgradePlanName || "Growth"} (
-                        {preflightData.quota.upgradePrice || "$10.99/mo"}) in Settings →
-                      </button>
+                      {planStatus.pricingPlansUrl ? (
+                        <a
+                          href={planStatus.pricingPlansUrl}
+                          target="_top"
+                          rel="noopener noreferrer"
+                          className="vis-preflight-upgrade-btn"
+                          style={{ textDecoration: "none", display: "inline-block" }}
+                        >
+                          ⚡ Upgrade to {preflightData.quota.upgradePlanName || "Growth"} (
+                          {preflightData.quota.upgradePrice || "$10.99/mo"}) in Shopify App Pricing ↗
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          className="vis-preflight-upgrade-btn"
+                          onClick={() => navigate("/app/settings")}
+                        >
+                          ⚡ Upgrade to {preflightData.quota.upgradePlanName || "Growth"} (
+                          {preflightData.quota.upgradePrice || "$10.99/mo"}) in Settings →
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1101,26 +1116,42 @@ export default function Dashboard() {
             </div>
 
             <div className="vis-plan-footer">
-              <button
-                type="button"
-                className="vis-plan-upgrade-btn"
-                onClick={() => navigate("/app/settings")}
-              >
-                {planStatus.actualPlanId === "starter"
-                  ? "Upgrade to Growth ($10.99/mo) in Settings →"
-                  : planStatus.actualPlanId === "growth"
-                  ? "Upgrade to Pro ($19.99/mo) in Settings →"
-                  : "Manage Active Plan in Settings →"}
-              </button>
+              {planStatus.pricingPlansUrl ? (
+                <a
+                  href={planStatus.pricingPlansUrl}
+                  target="_top"
+                  rel="noopener noreferrer"
+                  className="vis-plan-upgrade-btn"
+                  style={{ display: "block", textAlign: "center", textDecoration: "none" }}
+                >
+                  {planStatus.actualPlanId === "starter"
+                    ? "Upgrade to Growth ($10.99/mo) in Shopify App Pricing ↗"
+                    : planStatus.actualPlanId === "growth"
+                    ? "Upgrade to Pro ($19.99/mo) in Shopify App Pricing ↗"
+                    : "Manage Subscription in Shopify App Pricing ↗"}
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  className="vis-plan-upgrade-btn"
+                  onClick={() => navigate("/app/settings")}
+                >
+                  {planStatus.actualPlanId === "starter"
+                    ? "Upgrade to Growth ($10.99/mo) in Settings →"
+                    : planStatus.actualPlanId === "growth"
+                    ? "Upgrade to Pro ($19.99/mo) in Settings →"
+                    : "Manage Active Plan in Settings →"}
+                </button>
+              )}
               <div className="vis-plan-note">
-                Phase 2 Server Quota Enforcement Active. Billing checkout scheduled for Phase 3.
+                Phase 3 Shopify App Pricing Integration Active · Verified Quota Enforcement
               </div>
               <button
                 type="button"
                 className="vis-plan-settings-link"
                 onClick={() => navigate("/app/settings")}
               >
-                Full Feature Matrix & Plan Management →
+                Full Feature Matrix & Plan Details →
               </button>
             </div>
           </div>

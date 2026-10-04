@@ -16,7 +16,12 @@ import { getStorePlanStatus } from "../services/plan-enforcement.server";
 // ============================================================================
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
+
+  const url = new URL(request.url);
+  const returnPlanHandle = url.searchParams.get("plan_handle");
+  const billingApproved =
+    url.searchParams.get("billing") === "approved" || Boolean(returnPlanHandle);
 
   let historicalStats = {
     totalImports: 0,
@@ -38,6 +43,8 @@ export const loader = async ({ request }) => {
     billingMonth: "Current Month",
   };
 
+  let activationNotice = null;
+
   try {
     const [count, sumAssigned, sumFound, latest, status] = await Promise.all([
       db.importHistory.count({ where: { shop: session.shop } }),
@@ -54,10 +61,21 @@ export const loader = async ({ request }) => {
         orderBy: { createdAt: "desc" },
         select: { completedAt: true, createdAt: true },
       }),
-      getStorePlanStatus(session.shop, request),
+      getStorePlanStatus(session.shop, request, admin, returnPlanHandle),
     ]);
 
     planStatus = status;
+
+    if (returnPlanHandle || (billingApproved && status.subscriptionStatus === "ACTIVE")) {
+      const activePlan = PLANS[status.actualPlanId] || PLANS[PLAN_IDS.STARTER];
+      activationNotice = {
+        planId: status.actualPlanId,
+        planName: activePlan.name,
+        displayPrice: activePlan.displayPrice,
+        displayLimit: activePlan.displayLimit,
+        message: `Your store subscription is now active on the ${activePlan.name} tier (${activePlan.displayPrice}/mo)! Your monthly allowance is ${activePlan.displayLimit}.`,
+      };
+    }
 
     historicalStats = {
       totalImports: count || 0,
@@ -77,6 +95,7 @@ export const loader = async ({ request }) => {
     shop: session.shop,
     historicalStats,
     planStatus,
+    activationNotice,
   });
 };
 
@@ -149,12 +168,25 @@ function ToggleSwitch({ checked, onChange, disabled = false, ariaLabel }) {
 /**
  * Reusable Plan Tier Card
  */
-function PlanCard({ plan, isCurrent, isActualStorePlan, onSelect }) {
+function PlanCard({
+  plan,
+  isCurrent,
+  isActualStorePlan,
+  currentPlanTier,
+  pricingPlansUrl,
+  onSelect,
+}) {
   const isRecommended = plan.recommended;
+
+  const TIER_ORDER = { starter: 1, growth: 2, pro: 3 };
+  const currentRank = TIER_ORDER[currentPlanTier] || 1;
+  const planRank = TIER_ORDER[plan.id] || 1;
+  const isUpgrade = planRank > currentRank;
+  const isDowngrade = planRank < currentRank;
 
   return (
     <div
-      className={`set-plan-card ${isCurrent ? "current" : ""} ${
+      className={`set-plan-card ${isActualStorePlan ? "active-plan-card" : isCurrent ? "current" : ""} ${
         isRecommended ? "recommended" : ""
       }`}
     >
@@ -168,7 +200,7 @@ function PlanCard({ plan, isCurrent, isActualStorePlan, onSelect }) {
             {plan.badge}
           </span>
           {isActualStorePlan && (
-            <span className="set-plan-current-tag">ACTIVE STORE PLAN</span>
+            <span className="set-plan-current-tag active">ACTIVE STORE PLAN</span>
           )}
           {!isActualStorePlan && isCurrent && (
             <span className="set-plan-current-tag">PREVIEWING TIER</span>
@@ -207,19 +239,46 @@ function PlanCard({ plan, isCurrent, isActualStorePlan, onSelect }) {
       </ul>
 
       <div className="set-plan-card-bottom">
-        <button
-          type="button"
-          className={`set-plan-cta-btn ${isCurrent ? "active-btn" : "upgrade-btn"}`}
-          onClick={() => onSelect(plan.id)}
-        >
-          {isActualStorePlan
-            ? "Active Store Plan"
-            : isCurrent
-            ? `Previewing ${plan.name} Plan`
-            : `Preview ${plan.name} Plan`}
-        </button>
+        {isActualStorePlan ? (
+          <button
+            type="button"
+            className="set-plan-cta-btn current-active-btn"
+            disabled
+          >
+            ✓ Current Plan
+          </button>
+        ) : isUpgrade ? (
+          <a
+            href={pricingPlansUrl || "#"}
+            target="_top"
+            rel="noopener noreferrer"
+            className="set-plan-cta-btn upgrade-btn"
+          >
+            Upgrade to {plan.name} →
+          </a>
+        ) : (
+          <a
+            href={pricingPlansUrl || "#"}
+            target="_top"
+            rel="noopener noreferrer"
+            className="set-plan-cta-btn downgrade-btn"
+          >
+            Downgrade / Change Plan →
+          </a>
+        )}
+
+        {!isActualStorePlan && (
+          <button
+            type="button"
+            className="set-plan-preview-text-link"
+            onClick={() => onSelect(plan.id)}
+          >
+            {isCurrent ? "✓ Previewing Features" : `Preview ${plan.name} Features`}
+          </button>
+        )}
+
         <div className="set-plan-subnote">
-          Phase 2 Server Quota Active · Shopify Billing Checkout in Phase 3
+          Managed securely through Shopify App Pricing · Official Shopify approval
         </div>
       </div>
     </div>
@@ -246,16 +305,28 @@ function UsageCard({ currentPlan, historicalStats, planStatus }) {
     <div className="set-usage-card">
       <div className="set-usage-header">
         <div className="set-usage-title-col">
-          <span className="set-usage-badge">LIVE STORE USAGE · PHASE 2 ENFORCEMENT</span>
+          <span className="set-usage-badge">LIVE SHOPIFY SUBSCRIPTION · PHASE 3 BILLING</span>
           <h3 className="set-usage-title">Monthly Quota & Image Consumption</h3>
           <p className="set-usage-desc">
             Enforced server-side for billing cycle:{" "}
             <strong>{planStatus?.billingMonth || "Current Month"}</strong>.
           </p>
         </div>
-        <div className="set-usage-plan-pill">
-          <span className="set-plan-pill-name">{actualPlanConfig.name} Plan (Active)</span>
-          <span className="set-plan-pill-price">{actualPlanConfig.displayPrice}/mo</span>
+        <div className="set-usage-plan-actions">
+          <div className="set-usage-plan-pill">
+            <span className="set-plan-pill-name">{actualPlanConfig.name} Plan (Active)</span>
+            <span className="set-plan-pill-price">{actualPlanConfig.displayPrice}/mo</span>
+          </div>
+          {planStatus?.pricingPlansUrl && (
+            <a
+              href={planStatus.pricingPlansUrl}
+              target="_top"
+              rel="noopener noreferrer"
+              className="set-manage-sub-btn"
+            >
+              Manage in Shopify ↗
+            </a>
+          )}
         </div>
       </div>
 
@@ -311,10 +382,10 @@ function UsageCard({ currentPlan, historicalStats, planStatus }) {
         <div className="set-meter-footer-note">
           <span>
             {planStatus?.isUnlimited
-              ? "Unmetered volume enabled for Pro plan"
+              ? "Unmetered volume enabled for Pro tier"
               : `${(planStatus?.remaining || 0).toLocaleString()} images remaining before quota is reached.`}
           </span>
-          <span>Phase 2 Server Quota Enforcement Active</span>
+          <span>Phase 3 Shopify-Hosted Pricing & Verification Active</span>
         </div>
       </div>
     </div>
@@ -451,7 +522,7 @@ function PlanComparisonTable({ selectedPlan, onSelectPlan }) {
 // ============================================================================
 
 export default function SettingsPage() {
-  const { shop, historicalStats, planStatus } = useLoaderData();
+  const { shop, historicalStats, planStatus, activationNotice } = useLoaderData();
   const navigate = useNavigate();
 
   // Navigation tab state
@@ -643,14 +714,27 @@ export default function SettingsPage() {
         ======================================================= */}
         {activeTab === "plans" && (
           <div className="set-tab-pane">
-            {/* Phase 2 Status Banner */}
+            {/* Activation Notice Banner */}
+            {activationNotice && (
+              <div className="set-activation-banner">
+                <div className="set-activation-icon">🎉</div>
+                <div className="set-activation-content">
+                  <h3 className="set-activation-title">Subscription Activated!</h3>
+                  <p className="set-activation-desc">{activationNotice.message}</p>
+                </div>
+                <div className="set-activation-badge">
+                  ACTIVE TIER: {activationNotice.planName.toUpperCase()}
+                </div>
+              </div>
+            )}
+
+            {/* Phase 3 Status Banner */}
             <div className="set-phase-banner">
               <div className="set-phase-icon">⚡</div>
               <div className="set-phase-content">
-                <strong>Phase 2 Server Quota Enforcement Active:</strong> Monthly image limits
-                (Starter: 1,000 / Growth: 5,000 / Pro: Unlimited) are actively enforced on the server
-                before import jobs execute. Real billing checkout with Shopify Billing API is scheduled
-                for Phase 3.
+                <strong>Shopify App Pricing Integration Active:</strong> Monthly image quotas
+                (Starter: 1,000 / Growth: 5,000 / Pro: Unlimited) are verified and enforced in real-time.
+                Subscriptions and tier upgrades are securely managed through Shopify's official hosted pricing pages.
               </div>
             </div>
 
@@ -668,8 +752,8 @@ export default function SettingsPage() {
                   <span className="set-plans-badge">SUBSCRIPTION TIERS</span>
                   <h2 className="set-plans-title">Available Subscription Plans</h2>
                   <p className="set-plans-desc">
-                    Select a tier below to preview limits and features. Server quota enforcement
-                    is active for your store's assigned plan.
+                    Upgrade or manage your subscription through official Shopify App Pricing.
+                    Limits and features are automatically synced to your store.
                   </p>
                 </div>
               </div>
@@ -679,18 +763,24 @@ export default function SettingsPage() {
                   plan={PLANS[PLAN_IDS.STARTER]}
                   isCurrent={currentPlan === PLAN_IDS.STARTER}
                   isActualStorePlan={planStatus?.actualPlanId === PLAN_IDS.STARTER}
+                  currentPlanTier={planStatus?.actualPlanId || "starter"}
+                  pricingPlansUrl={planStatus?.pricingPlansUrl}
                   onSelect={handleSelectPlan}
                 />
                 <PlanCard
                   plan={PLANS[PLAN_IDS.GROWTH]}
                   isCurrent={currentPlan === PLAN_IDS.GROWTH}
                   isActualStorePlan={planStatus?.actualPlanId === PLAN_IDS.GROWTH}
+                  currentPlanTier={planStatus?.actualPlanId || "starter"}
+                  pricingPlansUrl={planStatus?.pricingPlansUrl}
                   onSelect={handleSelectPlan}
                 />
                 <PlanCard
                   plan={PLANS[PLAN_IDS.PRO]}
                   isCurrent={currentPlan === PLAN_IDS.PRO}
                   isActualStorePlan={planStatus?.actualPlanId === PLAN_IDS.PRO}
+                  currentPlanTier={planStatus?.actualPlanId || "starter"}
+                  pricingPlansUrl={planStatus?.pricingPlansUrl}
                   onSelect={handleSelectPlan}
                 />
               </div>
@@ -1173,6 +1263,48 @@ export default function SettingsPage() {
               color: var(--set-gold-bright);
             }
 
+            /* ACTIVATION BANNER */
+            .set-activation-banner {
+              background: linear-gradient(135deg, rgba(212, 175, 55, 0.18) 0%, rgba(16, 185, 129, 0.12) 100%);
+              border: 1px solid var(--set-gold-primary);
+              border-radius: 12px;
+              padding: 16px 20px;
+              display: flex;
+              gap: 14px;
+              align-items: center;
+              box-shadow: 0 8px 24px rgba(212, 175, 55, 0.2);
+              animation: setSlideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            }
+            .set-activation-icon {
+              font-size: 24px;
+              flex-shrink: 0;
+            }
+            .set-activation-content {
+              flex: 1;
+            }
+            .set-activation-title {
+              margin: 0;
+              font-size: 15px;
+              font-weight: 800;
+              color: var(--set-gold-bright);
+            }
+            .set-activation-desc {
+              margin: 4px 0 0;
+              font-size: 13px;
+              color: #F8FAFC;
+              line-height: 1.4;
+            }
+            .set-activation-badge {
+              font-size: 11px;
+              font-weight: 800;
+              padding: 4px 10px;
+              border-radius: 6px;
+              background: var(--set-gold-primary);
+              color: #1A1303;
+              letter-spacing: 0.5px;
+              flex-shrink: 0;
+            }
+
             /* PHASE BANNER */
             .set-phase-banner {
               background: rgba(56, 189, 248, 0.08);
@@ -1405,6 +1537,33 @@ export default function SettingsPage() {
               margin: 4px 0 0;
               font-size: 13px;
               color: var(--set-text-secondary);
+            }
+
+            .set-usage-plan-actions {
+              display: flex;
+              flex-direction: column;
+              align-items: flex-end;
+              gap: 8px;
+            }
+
+            .set-manage-sub-btn {
+              display: inline-flex;
+              align-items: center;
+              gap: 4px;
+              font-size: 11px;
+              font-weight: 700;
+              padding: 5px 12px;
+              border-radius: 6px;
+              background: rgba(212, 175, 55, 0.12);
+              border: 1px solid var(--set-border-gold);
+              color: var(--set-gold-bright);
+              text-decoration: none;
+              transition: all 0.2s ease;
+            }
+            .set-manage-sub-btn:hover {
+              background: var(--set-gold-primary);
+              color: #1A1303;
+              box-shadow: 0 4px 12px rgba(212, 175, 55, 0.3);
             }
 
             .set-usage-plan-pill {
@@ -1703,6 +1862,10 @@ export default function SettingsPage() {
               font-weight: 700;
               cursor: pointer;
               transition: all 0.2s;
+              text-decoration: none;
+              display: block;
+              text-align: center;
+              box-sizing: border-box;
             }
 
             .set-plan-cta-btn.upgrade-btn {
@@ -1716,10 +1879,46 @@ export default function SettingsPage() {
               box-shadow: 0 6px 20px rgba(212, 175, 55, 0.4);
             }
 
+            .set-plan-cta-btn.current-active-btn {
+              background: rgba(16, 185, 129, 0.12);
+              border: 1px solid rgba(16, 185, 129, 0.35);
+              color: var(--set-emerald);
+              cursor: default;
+              opacity: 0.95;
+            }
+
+            .set-plan-cta-btn.downgrade-btn {
+              background: rgba(255, 255, 255, 0.05);
+              border: 1px solid rgba(255, 255, 255, 0.15);
+              color: var(--set-text-secondary);
+            }
+            .set-plan-cta-btn.downgrade-btn:hover {
+              background: rgba(255, 255, 255, 0.12);
+              color: #FFFFFF;
+              border-color: rgba(255, 255, 255, 0.3);
+            }
+
             .set-plan-cta-btn.active-btn {
               background: rgba(56, 189, 248, 0.15);
               border: 1px solid var(--set-cyan);
               color: var(--set-cyan);
+            }
+
+            .set-plan-preview-text-link {
+              background: none;
+              border: none;
+              color: var(--set-text-muted);
+              font-size: 11px;
+              margin-top: 6px;
+              cursor: pointer;
+              text-decoration: underline;
+              display: block;
+              width: 100%;
+              text-align: center;
+              transition: color 0.15s ease;
+            }
+            .set-plan-preview-text-link:hover {
+              color: var(--set-gold-bright);
             }
 
             .set-plan-subnote {
