@@ -1,8 +1,6 @@
-import { defineConfig } from "@react-router/dev/config";
-
-export default defineConfig({
+export default {
   allowedActionOrigins: [
     "bulk.pinakkaa.com",
     "admin.shopify.com",
   ],
-});
+};
