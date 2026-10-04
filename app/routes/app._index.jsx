@@ -865,6 +865,13 @@ export default function Dashboard() {
               <div className="vis-plan-note">
                 UI structure prepared for future billing integration. No charges applied.
               </div>
+              <button
+                type="button"
+                className="vis-plan-settings-link"
+                onClick={() => navigate("/app/settings")}
+              >
+                Compare All Plans in Settings →
+              </button>
             </div>
           </div>
         </div>
@@ -2257,6 +2264,25 @@ export default function Dashboard() {
               color: var(--vis-text-muted);
               text-align: center;
               margin-top: 8px;
+            }
+
+            .vis-plan-settings-link {
+              background: none;
+              border: none;
+              color: var(--vis-gold-primary);
+              font-size: 11.5px;
+              font-weight: 700;
+              cursor: pointer;
+              margin-top: 8px;
+              text-decoration: underline;
+              text-underline-offset: 3px;
+              transition: color 0.2s;
+              width: 100%;
+              text-align: center;
+            }
+
+            .vis-plan-settings-link:hover {
+              color: var(--vis-gold-bright);
             }
 
             /* LIVE JOB CARD */
