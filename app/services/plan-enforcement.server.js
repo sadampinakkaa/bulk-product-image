@@ -58,18 +58,37 @@ export async function verifyShopifySubscription({
   }
 
   // 1. Handle Welcome / Return flow from Shopify App Pricing
-  let effectiveReturnHandle = returnPlanHandle;
-  if (!effectiveReturnHandle && request?.url) {
+  let returnPlanFromQuery = null;
+  let hasReturnSignal = Boolean(returnPlanHandle);
+
+  if (request?.url) {
     try {
       const parsedUrl = new URL(request.url);
-      effectiveReturnHandle = parsedUrl.searchParams.get("plan_handle");
+      returnPlanFromQuery = parsedUrl.searchParams.get("plan_handle");
+      if (
+        returnPlanFromQuery ||
+        parsedUrl.searchParams.has("charge_id") ||
+        parsedUrl.searchParams.has("billing_approved")
+      ) {
+        hasReturnSignal = true;
+      }
     } catch {}
   }
 
-  if (effectiveReturnHandle) {
+  // When a merchant returns from Shopify App Pricing / Billing approval,
+  // invalidate any stale cache so fresh active subscription data is queried.
+  if (hasReturnSignal) {
+    invalidateShopSubscriptionCache(shop);
+  }
+
+  // In non-production environments only (local dev / automated tests),
+  // allow plan_handle query param or returnPlanHandle to simulate active plan return flow.
+  // In production (NODE_ENV === "production"), query parameters and returnPlanHandle are
+  // NEVER trusted as proof of payment; subscriptions MUST be verified via Partner/Admin GraphQL API.
+  const effectiveReturnHandle = returnPlanHandle || returnPlanFromQuery;
+  if (effectiveReturnHandle && process.env.NODE_ENV !== "production") {
     const mappedPlanId = mapShopifyHandleToPlanId(effectiveReturnHandle);
     if (mappedPlanId && PLANS[mappedPlanId]) {
-      invalidateShopSubscriptionCache(shop);
       const returnResult = {
         active: true,
         planId: mappedPlanId,

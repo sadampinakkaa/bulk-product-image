@@ -154,29 +154,82 @@ export function mapShopifyHandleToPlanId(rawHandle) {
 }
 
 /**
+ * Authoritative default app handle fallback.
+ * Derived from the official registered app handle in shopify.app.toml & package.json.
+ */
+export const DEFAULT_SHOPIFY_APP_HANDLE = "bulk-variant-update-g-sync";
+
+/**
+ * Extracts the clean store handle from any Shopify domain format.
+ * Examples:
+ * - "quickstart-6912345.myshopify.com" -> "quickstart-6912345"
+ * - "https://quickstart-6912345.myshopify.com/" -> "quickstart-6912345"
+ * - "admin.shopify.com/store/my-brand" -> "my-brand"
+ * - "https://admin.shopify.com/store/my-brand/apps/..." -> "my-brand"
+ * - "my-brand?shop=..." -> "my-brand"
+ *
+ * @param {string} shop
+ * @returns {string} Clean store handle or empty string
+ */
+export function extractStoreHandle(shop) {
+  if (!shop || typeof shop !== "string") return "";
+  let clean = shop.trim();
+  // Strip protocol
+  clean = clean.replace(/^https?:\/\//i, "");
+  // Strip query string and hash
+  clean = clean.split("?")[0].split("#")[0];
+  // If format is admin.shopify.com/store/{handle}
+  if (/^admin\.shopify\.com\/store\//i.test(clean)) {
+    clean = clean.replace(/^admin\.shopify\.com\/store\//i, "");
+  }
+  // Strip .myshopify.com domain suffix
+  clean = clean.replace(/\.myshopify\.com.*$/i, "");
+  // Strip any trailing path components
+  clean = clean.replace(/\/.*$/, "");
+  return clean.trim();
+}
+
+/**
+ * Resolves the effective app handle.
+ * Prioritizes:
+ * 1. Explicit appHandle argument passed to function
+ * 2. process.env.SHOPIFY_APP_HANDLE
+ * 3. DEFAULT_SHOPIFY_APP_HANDLE ("bulk-variant-update-g-sync")
+ *
+ * @param {string} [appHandle]
+ * @returns {string} Effective app slug
+ */
+export function extractAppHandle(appHandle = null) {
+  if (appHandle && typeof appHandle === "string" && appHandle.trim().length > 0) {
+    return appHandle.trim();
+  }
+  const configured = getEnvVar("SHOPIFY_APP_HANDLE", null);
+  if (configured && typeof configured === "string" && configured.trim().length > 0) {
+    return configured.trim();
+  }
+  return DEFAULT_SHOPIFY_APP_HANDLE;
+}
+
+/**
  * Dynamically constructs the official Shopify-hosted App Pricing selection URL.
  * Pattern: https://admin.shopify.com/store/:store_handle/charges/:app_handle/pricing_plans
  *
+ * NOTE: As documented by Shopify, the hosted pricing area is located strictly at:
+ * /charges/:app_handle/pricing_plans
+ * No plan sub-path (e.g. /growth) should ever be appended.
+ *
  * @param {Object} options
  * @param {string} options.shop - The merchant shop domain (e.g. 'my-store.myshopify.com' or admin URL)
- * @param {string} [options.appHandle] - The app's public listing handle from Partner Dashboard
+ * @param {string} [options.appHandle] - Optional custom app listing handle override
  * @returns {string|null} The fully-qualified Shopify Admin URL
  */
 export function getShopifyPricingPlansUrl({ shop, appHandle = null }) {
-  if (!shop || typeof shop !== "string") return null;
+  const storeHandle = extractStoreHandle(shop);
+  if (!storeHandle) return null;
 
-  // Clean and extract store handle
-  let cleanShop = shop.trim();
-  cleanShop = cleanShop.replace(/^https?:\/\//i, "");
-  cleanShop = cleanShop.replace(/^admin\.shopify\.com\/store\//i, "");
-  cleanShop = cleanShop.replace(/\.myshopify\.com.*$/i, "");
-  cleanShop = cleanShop.replace(/\/.*$/, "");
+  const effectiveAppHandle = extractAppHandle(appHandle);
 
-  const effectiveAppHandle =
-    appHandle ||
-    getEnvVar("SHOPIFY_APP_HANDLE", "variant-image-sync");
-
-  return `https://admin.shopify.com/store/${encodeURIComponent(cleanShop)}/charges/${encodeURIComponent(effectiveAppHandle)}/pricing_plans`;
+  return `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/charges/${encodeURIComponent(effectiveAppHandle)}/pricing_plans`;
 }
 
 // ============================================================================

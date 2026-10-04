@@ -12,13 +12,16 @@
 // 8. Welcome / Return flow plan activation and cache refresh
 // 9. In-memory TTL caching and explicit cache invalidation
 // 10. Central PLANS configuration pricing verification ($4.99, $10.99, $19.99)
-process.env.DATABASE_URL = process.env.DATABASE_URL || "file:./dev.sqlite";
+process.env.DATABASE_URL = process.env.DATABASE_URL || "mysql://user:pass@localhost:3306/db";
 
 import assert from "node:assert/strict";
 import {
   PLAN_IDS,
   PLANS,
   SHOPIFY_PLAN_HANDLES,
+  DEFAULT_SHOPIFY_APP_HANDLE,
+  extractStoreHandle,
+  extractAppHandle,
   mapShopifyHandleToPlanId,
   getShopifyPricingPlansUrl,
   canUseFeature,
@@ -102,15 +105,31 @@ await test("Unknown or invalid handles return null (never accidentally grants pa
 });
 
 // ----------------------------------------------------------------------------
-// 3. DYNAMIC SHOPIFY APP PRICING URL GENERATION
+// 3. DYNAMIC SHOPIFY APP PRICING URL GENERATION & HANDLE RESOLUTION
 // ----------------------------------------------------------------------------
 console.log("--- 3. SHOPIFY APP PRICING URL GENERATION TESTS ---");
 
-await test("Generates canonical pricing plans URL from shop domain", () => {
+await test("extractStoreHandle accurately extracts clean subdomain across formats", () => {
+  assert.equal(extractStoreHandle("my-cool-boutique.myshopify.com"), "my-cool-boutique");
+  assert.equal(extractStoreHandle("https://my-cool-boutique.myshopify.com/"), "my-cool-boutique");
+  assert.equal(extractStoreHandle("admin.shopify.com/store/pinakkaa-demo"), "pinakkaa-demo");
+  assert.equal(extractStoreHandle("https://admin.shopify.com/store/pinakkaa-demo/apps/bulk"), "pinakkaa-demo");
+  assert.equal(extractStoreHandle("pinakkaa-demo?locale=en&shop=other"), "pinakkaa-demo");
+  assert.equal(extractStoreHandle(""), "");
+  assert.equal(extractStoreHandle(null), "");
+});
+
+await test("extractAppHandle resolves default, environment variable, or explicit override", () => {
+  assert.equal(DEFAULT_SHOPIFY_APP_HANDLE, "bulk-variant-update-g-sync");
+  assert.equal(extractAppHandle(), "bulk-variant-update-g-sync");
+  assert.equal(extractAppHandle("custom-slug"), "custom-slug");
+});
+
+await test("Generates canonical pricing plans URL from shop domain (bulk-variant-update-g-sync)", () => {
   const url = getShopifyPricingPlansUrl({ shop: "my-cool-boutique.myshopify.com" });
   assert.equal(
     url,
-    "https://admin.shopify.com/store/my-cool-boutique/charges/variant-image-sync/pricing_plans"
+    "https://admin.shopify.com/store/my-cool-boutique/charges/bulk-variant-update-g-sync/pricing_plans"
   );
 });
 
@@ -284,6 +303,28 @@ await test("PRODUCTION SECURITY: Client headers and STORE_PLAN are strictly IGNO
   }
 });
 
+await test("PRODUCTION SECURITY: URL query parameters (e.g. ?plan_handle=pro) are strictly IGNORED in production without active Shopify subscription", async () => {
+  const origEnv = process.env.NODE_ENV;
+
+  try {
+    process.env.NODE_ENV = "production";
+
+    const forgedReq = new Request("https://myapp.com/app/settings?plan_handle=pro&charge_id=fake123");
+    const shop = "forged-param-shop.myshopify.com";
+    invalidateShopSubscriptionCache(shop);
+
+    // In production, ?plan_handle=pro MUST NOT grant Pro without verified Admin GraphQL active subscription
+    const verified = await verifyShopifySubscription({ shop, request: forgedReq });
+    assert.equal(
+      verified.planId,
+      PLAN_IDS.STARTER,
+      "CRITICAL: Production must never grant paid tier from unverified return URL query params!"
+    );
+  } finally {
+    process.env.NODE_ENV = origEnv;
+  }
+});
+
 // ----------------------------------------------------------------------------
 // 6. getStorePlanStatus COMPREHENSIVE OUTPUT
 // ----------------------------------------------------------------------------
@@ -299,7 +340,7 @@ await test("getStorePlanStatus returns pricingPlansUrl, quotas and features", as
   assert.equal(status.displayPrice, "$4.99");
   assert.equal(status.limit, 1000);
   assert.equal(typeof status.pricingPlansUrl, "string");
-  assert.match(status.pricingPlansUrl, /charges\/variant-image-sync\/pricing_plans/);
+  assert.match(status.pricingPlansUrl, /charges\/bulk-variant-update-g-sync\/pricing_plans/);
   assert.equal(status.canUseAcceleratedQueue, false);
   assert.equal(status.canUsePriorityQueue, false);
 });
