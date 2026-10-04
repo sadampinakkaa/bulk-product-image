@@ -24,8 +24,13 @@ import {
   createImportJob,
 } from "../services/image-import.server.js";
 
+import {
+  getStorePlanStatus,
+  runImportPreflight,
+} from "../services/plan-enforcement.server.js";
+
 // ======================================================
-// LOADER (Fetches Recent History & Aggregate Store Stats)
+// LOADER (Fetches Recent History, Store Stats & Plan Quota)
 // ======================================================
 
 export const loader = async ({
@@ -40,22 +45,14 @@ export const loader = async ({
 
     const shop = session?.shop || "";
 
-    const recentRecords =
-      await db.importHistory.findMany({
-        where: {
-          shop,
-        },
-        orderBy: {
-          createdAt: "desc",
-        },
+    const [recentRecords, aggregates, planStatus] = await Promise.all([
+      db.importHistory.findMany({
+        where: { shop },
+        orderBy: { createdAt: "desc" },
         take: 5,
-      });
-
-    const aggregates =
-      await db.importHistory.aggregate({
-        where: {
-          shop,
-        },
+      }),
+      db.importHistory.aggregate({
+        where: { shop },
         _sum: {
           imagesFound: true,
           variantsMatched: true,
@@ -67,7 +64,9 @@ export const loader = async ({
         _count: {
           id: true,
         },
-      });
+      }),
+      getStorePlanStatus(shop, request),
+    ]);
 
     return Response.json({
       shop,
@@ -97,6 +96,7 @@ export const loader = async ({
         totalSkipped: aggregates._sum.skuNotFound || 0,
         totalErrors: aggregates._sum.errors || 0,
       },
+      planStatus,
     });
   } catch (err) {
     console.error("Dashboard loader error:", err);
@@ -112,12 +112,26 @@ export const loader = async ({
         totalSkipped: 0,
         totalErrors: 0,
       },
+      planStatus: {
+        actualPlanId: "starter",
+        planName: "Starter",
+        tierLabel: "Starter Tier",
+        displayPrice: "$4.99",
+        limit: 1000,
+        used: 0,
+        remaining: 1000,
+        isUnlimited: false,
+        percentUsed: 0,
+        billingMonth: "Current Month",
+        canUseAcceleratedQueue: false,
+        canUsePriorityQueue: false,
+      },
     });
   }
 };
 
 // ======================================================
-// ACTION (Starts the background Google Drive Import Job)
+// ACTION (Pre-flight Inspection & Gated Import Job Start)
 // ======================================================
 
 export const action = async ({
@@ -131,8 +145,38 @@ export const action = async ({
       request
     );
 
+    if (!admin) {
+      return Response.json(
+        {
+          ok: false,
+          message:
+            "Shopify Admin connection could not be established.",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
+    if (!session?.shop) {
+      return Response.json(
+        {
+          ok: false,
+          message:
+            "Shop session could not be identified.",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
     const formData =
       await request.formData();
+
+    const intent = String(
+      formData.get("intent") || "start"
+    ).trim();
 
     const driveUrl = String(
       formData.get("driveUrl") || ""
@@ -164,37 +208,59 @@ export const action = async ({
       );
     }
 
-    if (!admin) {
+    // 1. Authoritative Pre-flight inspection & monthly quota calculation
+    const preflight =
+      await runImportPreflight({
+        shop: session.shop,
+        driveUrl,
+        request,
+      });
+
+    if (!preflight.ok) {
       return Response.json(
         {
           ok: false,
-          message:
-            "Shopify Admin connection could not be established.",
+          message: preflight.message,
+          preflight,
         },
         {
-          status: 500,
+          status: 400,
         }
       );
     }
 
-    if (!session?.shop) {
+    // If intent is purely pre-flight inspection, return summary
+    if (intent === "preflight") {
+      return Response.json({
+        ok: true,
+        intent: "preflight",
+        preflight,
+        message: preflight.message,
+      });
+    }
+
+    // 2. Server-Side Quota Enforcement: Hard block if quota exceeded
+    if (!preflight.allowed) {
       return Response.json(
         {
           ok: false,
-          message:
-            "Shop session could not be identified.",
+          blocked: true,
+          message: preflight.message,
+          preflight,
         },
         {
-          status: 500,
+          status: 403,
         }
       );
     }
 
+    // 3. Quota approved: Start background import job
     const jobId =
       await createImportJob({
         admin,
         shop: session.shop,
         driveUrl,
+        planId: preflight.quota.planId,
       });
 
     return Response.json({
@@ -202,6 +268,7 @@ export const action = async ({
       jobId,
       message:
         "Import started.",
+      preflight,
     });
   } catch (error) {
     console.error(
@@ -308,6 +375,19 @@ export default function Dashboard() {
     totalErrors: 0,
   };
 
+  const planStatus = loaderData.planStatus || {
+    actualPlanId: "starter",
+    planName: "Starter",
+    tierLabel: "Starter Tier",
+    displayPrice: "$4.99",
+    limit: 1000,
+    used: 0,
+    remaining: 1000,
+    isUnlimited: false,
+    percentUsed: 0,
+    billingMonth: "Current Month",
+  };
+
   const startFetcher = useFetcher();
   const statusFetcher = useFetcher();
 
@@ -315,13 +395,15 @@ export default function Dashboard() {
   const [urlError, setUrlError] = useState("");
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState(null);
+  const [preflightData, setPreflightData] = useState(null);
 
   // Plan simulator state (Starter $4.99 vs Growth $10.99 vs Pro $19.99)
   const [selectedPlan, setSelectedPlan] = useState("starter");
   const [testSkuInput, setTestSkuInput] = useState("TSHIRT-BLK-M.jpg");
 
   const result = startFetcher.data;
-  const isStarting = startFetcher.state !== "idle";
+  const isStarting = startFetcher.state !== "idle" && startFetcher.formData?.get("intent") !== "preflight";
+  const isPreflighting = startFetcher.state !== "idle" && startFetcher.formData?.get("intent") === "preflight";
 
   // Job Data
   const progress = status?.progress || null;
@@ -336,11 +418,15 @@ export default function Dashboard() {
     status?.status === "completed_with_errors" ||
     status?.status === "failed";
 
-  // Job Created Hook
+  // Job Created / Preflight Hook
   useEffect(() => {
+    if (result?.preflight) {
+      setPreflightData(result.preflight);
+    }
     if (result?.ok && result.jobId) {
       setJobId(result.jobId);
       setStatus(null);
+      setPreflightData(null);
     }
   }, [result]);
 
@@ -435,12 +521,44 @@ export default function Dashboard() {
       return;
     }
 
+    // If preflight check was run and already confirmed blocked, prompt upgrade
+    if (preflightData && !preflightData.allowed) {
+      setUrlError("Import blocked: Current batch exceeds monthly plan allowance. Please upgrade your plan in Settings.");
+      return;
+    }
+
     setJobId(null);
     setStatus(null);
 
     startFetcher.submit(
       {
         driveUrl: value,
+        intent: "start",
+      },
+      {
+        method: "post",
+      }
+    );
+  };
+
+  const handlePreflightScan = () => {
+    const value = driveUrl.trim();
+    setUrlError("");
+
+    if (!value) {
+      setUrlError("Please enter your Google Drive folder URL.");
+      return;
+    }
+
+    if (!isValidDriveUrl(value)) {
+      setUrlError("Please enter a valid Google Drive folder URL.");
+      return;
+    }
+
+    startFetcher.submit(
+      {
+        driveUrl: value,
+        intent: "preflight",
       },
       {
         method: "post",
@@ -453,6 +571,7 @@ export default function Dashboard() {
     setUrlError("");
     setJobId(null);
     setStatus(null);
+    setPreflightData(null);
   };
 
   const handleSamplePaste = () => {
@@ -534,43 +653,31 @@ export default function Dashboard() {
 
           <div className="vis-hero-meta">
             <div className="vis-tier-pill">
-              <div className="vis-tier-title">PLAN TIER (PREVIEW)</div>
+              <div className="vis-tier-title">ACTIVE STORE PLAN</div>
               <div className="vis-tier-name">
-                {selectedPlan === "starter"
-                  ? "Starter Plan"
-                  : selectedPlan === "growth"
-                  ? "Growth Plan"
-                  : "Pro Plan"}
+                {planStatus.planName} Tier
               </div>
               <div className="vis-tier-price">
-                {selectedPlan === "starter"
-                  ? "$4.99"
-                  : selectedPlan === "growth"
-                  ? "$10.99"
-                  : "$19.99"}
+                {planStatus.displayPrice}
                 <span>/mo</span>
+              </div>
+              <div className="vis-tier-usage-tag">
+                {planStatus.isUnlimited
+                  ? `${planStatus.used.toLocaleString()} images synced this month`
+                  : `${planStatus.used.toLocaleString()} / ${planStatus.limit.toLocaleString()} images (${planStatus.remaining.toLocaleString()} left)`}
               </div>
               <button
                 type="button"
                 className="vis-tier-toggle-btn"
-                onClick={() =>
-                  setSelectedPlan(
-                    selectedPlan === "starter"
-                      ? "growth"
-                      : selectedPlan === "growth"
-                      ? "pro"
-                      : "starter",
-                  )
-                }
+                onClick={() => navigate("/app/settings")}
               >
-                Preview{" "}
-                {selectedPlan === "starter"
-                  ? "Growth ($10.99)"
-                  : selectedPlan === "growth"
-                  ? "Pro ($19.99)"
-                  : "Starter ($4.99)"}
+                Plan & Quota Settings →
               </button>
-              <div className="vis-tier-subnote">UI Placeholder · Billing Inactive</div>
+              <div className="vis-tier-subnote">
+                {planStatus.isUnlimited
+                  ? "Unmetered Volume · Pro VIP Queue"
+                  : `Renews monthly · Cycle: ${planStatus.billingMonth}`}
+              </div>
             </div>
           </div>
         </div>
@@ -677,13 +784,111 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 2. CLEAR “SYNC VARIANT IMAGES” PRIMARY CTA */}
+            {/* PRE-FLIGHT INSPECTION SUMMARY CARD */}
+            {preflightData && (
+              <div
+                className={`vis-preflight-card ${
+                  preflightData.allowed ? "allowed" : "blocked"
+                }`}
+              >
+                <div className="vis-preflight-header">
+                  <div className="vis-preflight-title-box">
+                    <span className="vis-preflight-icon">
+                      {preflightData.allowed ? "✓" : "⚠️"}
+                    </span>
+                    <div>
+                      <h4 className="vis-preflight-title">
+                        {preflightData.allowed
+                          ? "Pre-Flight Inspection Approved"
+                          : "Monthly Plan Quota Exceeded"}
+                      </h4>
+                      <p className="vis-preflight-subtitle">
+                        Folder ID: <code>{preflightData.folderId}</code> · Verified on Google Drive
+                      </p>
+                    </div>
+                  </div>
+                  <span
+                    className={`vis-preflight-badge ${
+                      preflightData.allowed ? "approved" : "blocked"
+                    }`}
+                  >
+                    {preflightData.allowed ? "SYNC ALLOWED" : "UPGRADE REQUIRED"}
+                  </span>
+                </div>
+
+                <div className="vis-preflight-grid">
+                  <div className="vis-preflight-metric">
+                    <span className="vis-preflight-label">Folder Images</span>
+                    <strong className="vis-preflight-val gold">
+                      {preflightData.folderImagesCount.toLocaleString()}
+                    </strong>
+                    <span className="vis-preflight-sub">Detected in folder</span>
+                  </div>
+                  <div className="vis-preflight-metric">
+                    <span className="vis-preflight-label">Month's Used</span>
+                    <strong className="vis-preflight-val">
+                      {preflightData.quota.used.toLocaleString()}
+                    </strong>
+                    <span className="vis-preflight-sub">
+                      of {preflightData.quota.isUnlimited ? "Unlimited" : preflightData.quota.limit.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="vis-preflight-metric">
+                    <span className="vis-preflight-label">Remaining Allowance</span>
+                    <strong
+                      className={`vis-preflight-val ${
+                        preflightData.allowed ? "green" : "red"
+                      }`}
+                    >
+                      {preflightData.quota.isUnlimited
+                        ? "Unlimited"
+                        : preflightData.quota.remaining.toLocaleString()}
+                    </strong>
+                    <span className="vis-preflight-sub">
+                      {preflightData.quota.planName} tier
+                    </span>
+                  </div>
+                </div>
+
+                {preflightData.allowed ? (
+                  <div className="vis-preflight-msg success">
+                    <span>
+                      ✓ This batch of <strong>{preflightData.folderImagesCount.toLocaleString()}</strong> images fits within your remaining monthly quota (<strong>{preflightData.quota.isUnlimited ? "Unlimited" : `${preflightData.quota.remaining.toLocaleString()} remaining`}</strong>). Click <strong>Sync Variant Images</strong> to proceed.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="vis-preflight-msg warning">
+                    <p className="vis-preflight-warning-text">
+                      {preflightData.message}
+                    </p>
+                    <div className="vis-preflight-cta-row">
+                      <button
+                        type="button"
+                        className="vis-preflight-upgrade-btn"
+                        onClick={() => navigate("/app/settings")}
+                      >
+                        ⚡ Upgrade to {preflightData.quota.upgradePlanName || "Growth"} (
+                        {preflightData.quota.upgradePrice || "$10.99/mo"}) in Settings →
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 2. CLEAR “SYNC VARIANT IMAGES” PRIMARY CTA & ACTIONS */}
             <div className="vis-action-bar">
               <button
                 type="button"
                 className="vis-btn-primary"
                 onClick={handleImport}
-                disabled={isStarting || isRunning || !driveUrl.trim()}
+                disabled={
+                  isStarting ||
+                  isPreflighting ||
+                  isRunning ||
+                  !driveUrl.trim() ||
+                  (preflightData && !preflightData.allowed)
+                }
               >
                 {isStarting ? (
                   <>
@@ -706,8 +911,27 @@ export default function Dashboard() {
               <button
                 type="button"
                 className="vis-btn-secondary"
+                onClick={handlePreflightScan}
+                disabled={isStarting || isPreflighting || isRunning || !driveUrl.trim()}
+                title="Verify folder image count and calculate quota before importing"
+              >
+                {isPreflighting ? (
+                  <>
+                    <span className="vis-spinner"></span>
+                    <span>Scanning Drive...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>🔍 Verify Quota</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                className="vis-btn-ghost"
                 onClick={handleClear}
-                disabled={isStarting || isRunning || !driveUrl}
+                disabled={isStarting || isPreflighting || isRunning || !driveUrl}
               >
                 Reset
               </button>
@@ -722,7 +946,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* 10. PLAN & USAGE CARD (STARTER $4.99 / GROWTH $10.99 / PRO $19.99 - UI PLACEHOLDER) */}
+          {/* 10. PLAN & USAGE CARD (STARTER $4.99 / GROWTH $10.99 / PRO $19.99 - PHASE 2 ACTIVE ENFORCEMENT) */}
           <div className="vis-card vis-plan-card">
             {/* Interactive Tier Switcher Tabs */}
             <div className="vis-plan-tier-tabs">
@@ -752,11 +976,9 @@ export default function Dashboard() {
             <div className="vis-plan-header">
               <div>
                 <span className="vis-plan-badge">
-                  {selectedPlan === "starter"
-                    ? "STARTER TIER (UI PLACEHOLDER)"
-                    : selectedPlan === "growth"
-                    ? "GROWTH TIER (UI PLACEHOLDER)"
-                    : "PRO ENTERPRISE (UI PLACEHOLDER)"}
+                  {selectedPlan === planStatus.actualPlanId
+                    ? "ACTIVE STORE PLAN (SERVER ENFORCED)"
+                    : `PREVIEWING ${selectedPlan.toUpperCase()} TIER`}
                 </span>
                 <h3 className="vis-plan-title">
                   {selectedPlan === "starter"
@@ -774,20 +996,20 @@ export default function Dashboard() {
                     ? "$10.99"
                     : "$19.99"}
                 </div>
-                <div className="vis-plan-period">per month (placeholder)</div>
+                <div className="vis-plan-period">per month</div>
               </div>
             </div>
 
             {/* Monthly Image Usage Meter Grounded in Real Store Totals */}
             <div className="vis-usage-block">
               <div className="vis-usage-info">
-                <span>Store Synced Images (Assigned Total)</span>
+                <span>Month's Usage ({planStatus.billingMonth})</span>
                 <strong>
-                  {selectedPlan === "starter"
-                    ? `${(historicalStats.totalAssigned || 0).toLocaleString()} / 1,000 tier limit`
+                  {selectedPlan === "pro"
+                    ? `${planStatus.used.toLocaleString()} / Unlimited`
                     : selectedPlan === "growth"
-                    ? `${(historicalStats.totalAssigned || 0).toLocaleString()} / 5,000 tier limit`
-                    : `${(historicalStats.totalAssigned || 0).toLocaleString()} / Unlimited`}
+                    ? `${planStatus.used.toLocaleString()} / 5,000 images`
+                    : `${planStatus.used.toLocaleString()} / 1,000 images`}
                 </strong>
               </div>
               <div className="vis-usage-bar-track">
@@ -795,23 +1017,30 @@ export default function Dashboard() {
                   className="vis-usage-bar-fill"
                   style={{
                     width:
-                      selectedPlan === "starter"
-                        ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 1000) * 100))}%`
+                      selectedPlan === "pro"
+                        ? "100%"
                         : selectedPlan === "growth"
-                        ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 5000) * 100))}%`
-                        : "100%",
+                        ? `${Math.min(100, Math.round((planStatus.used / 5000) * 100))}%`
+                        : `${Math.min(100, Math.round((planStatus.used / 1000) * 100))}%`,
+                    background:
+                      selectedPlan !== "pro" &&
+                      (selectedPlan === "growth" ? planStatus.used / 5000 : planStatus.used / 1000) > 0.9
+                        ? "linear-gradient(90deg, #EF4444, #F87171)"
+                        : (selectedPlan === "growth" ? planStatus.used / 5000 : planStatus.used / 1000) > 0.75
+                        ? "linear-gradient(90deg, #F59E0B, #FBBF24)"
+                        : undefined,
                   }}
                 ></div>
               </div>
               <div className="vis-usage-meta">
                 <span>
-                  {selectedPlan === "starter"
-                    ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 1000) * 100))}% of Starter capacity`
+                  {selectedPlan === "pro"
+                    ? "Unmetered volume on Pro tier"
                     : selectedPlan === "growth"
-                    ? `${Math.min(100, Math.round(((historicalStats.totalAssigned || 0) / 5000) * 100))}% of Growth capacity`
-                    : "Unmetered volume on Pro tier"}
+                    ? `${Math.max(0, 5000 - planStatus.used).toLocaleString()} images remaining in Growth capacity`
+                    : `${Math.max(0, 1000 - planStatus.used).toLocaleString()} images remaining in Starter capacity`}
                 </span>
-                <span>UI Preview · Billing inactive</span>
+                <span>Active Server Plan: {planStatus.planName}</span>
               </div>
             </div>
 
@@ -822,23 +1051,52 @@ export default function Dashboard() {
               </div>
               <div className="vis-feat-item">
                 <span className="vis-check">✓</span>
-                <span>Automated SKU exact & trimmed matching</span>
-              </div>
-              <div className="vis-feat-item">
-                <span className="vis-check">✓</span>
-                <span>Shopify GraphQL Staged Upload API</span>
+                <span>Exact SKU variant matching</span>
+                <span className="vis-active-badge">Active</span>
               </div>
               <div className="vis-feat-item">
                 <span className="vis-check">
-                  {selectedPlan === "pro" ? "✓" : selectedPlan === "growth" ? "✓" : "✦"}
+                  {selectedPlan === "starter" ? "🔒" : "✓"}
                 </span>
                 <span className={selectedPlan === "starter" ? "vis-feat-locked" : ""}>
-                  {selectedPlan === "pro"
-                    ? "Priority concurrent processing queue"
-                    : selectedPlan === "growth"
-                    ? "Accelerated queue processing"
-                    : "Priority processing (Growth / Pro feature)"}
+                  Accelerated Queue Processing
                 </span>
+                {selectedPlan === "starter" && (
+                  <span className="vis-lock-badge">Growth Tier</span>
+                )}
+              </div>
+              <div className="vis-feat-item">
+                <span className="vis-check">
+                  {selectedPlan === "starter" ? "🔒" : "✓"}
+                </span>
+                <span className={selectedPlan === "starter" ? "vis-feat-locked" : ""}>
+                  Fuzzy Variant Matching Engine
+                </span>
+                {selectedPlan === "starter" && (
+                  <span className="vis-lock-badge">Growth Tier</span>
+                )}
+              </div>
+              <div className="vis-feat-item">
+                <span className="vis-check">
+                  {selectedPlan === "pro" ? "✓" : "🔒"}
+                </span>
+                <span className={selectedPlan !== "pro" ? "vis-feat-locked" : ""}>
+                  VIP Priority Queue & Concurrent Uploads
+                </span>
+                {selectedPlan !== "pro" && (
+                  <span className="vis-lock-badge">Pro Tier</span>
+                )}
+              </div>
+              <div className="vis-feat-item">
+                <span className="vis-check">
+                  {selectedPlan === "pro" ? "✓" : "🔒"}
+                </span>
+                <span className={selectedPlan !== "pro" ? "vis-feat-locked" : ""}>
+                  Custom Delimiters & Regex SKU Extractors
+                </span>
+                {selectedPlan !== "pro" && (
+                  <span className="vis-lock-badge">Pro Tier</span>
+                )}
               </div>
             </div>
 
@@ -846,31 +1104,23 @@ export default function Dashboard() {
               <button
                 type="button"
                 className="vis-plan-upgrade-btn"
-                onClick={() =>
-                  setSelectedPlan(
-                    selectedPlan === "starter"
-                      ? "growth"
-                      : selectedPlan === "growth"
-                      ? "pro"
-                      : "starter",
-                  )
-                }
+                onClick={() => navigate("/app/settings")}
               >
-                {selectedPlan === "starter"
-                  ? "Preview Growth Tier ($10.99/mo)"
-                  : selectedPlan === "growth"
-                  ? "Preview Pro Tier ($19.99/mo)"
-                  : "Preview Starter Tier ($4.99/mo)"}
+                {planStatus.actualPlanId === "starter"
+                  ? "Upgrade to Growth ($10.99/mo) in Settings →"
+                  : planStatus.actualPlanId === "growth"
+                  ? "Upgrade to Pro ($19.99/mo) in Settings →"
+                  : "Manage Active Plan in Settings →"}
               </button>
               <div className="vis-plan-note">
-                UI structure prepared for future billing integration. No charges applied.
+                Phase 2 Server Quota Enforcement Active. Billing checkout scheduled for Phase 3.
               </div>
               <button
                 type="button"
                 className="vis-plan-settings-link"
                 onClick={() => navigate("/app/settings")}
               >
-                Compare All Plans in Settings →
+                Full Feature Matrix & Plan Management →
               </button>
             </div>
           </div>
@@ -3097,6 +3347,203 @@ export default function Dashboard() {
             .vis-alert-text span {
               color: #E2E8F0;
               font-size: 12.5px;
+            }
+
+            /* PRE-FLIGHT INSPECTION CARD */
+            .vis-preflight-card {
+              margin-top: 18px;
+              padding: 16px 18px;
+              border-radius: 12px;
+              background: rgba(15, 20, 30, 0.95);
+              border: 1px solid var(--vis-border-gold);
+              animation: visFadeIn 0.3s ease;
+            }
+
+            .vis-preflight-card.blocked {
+              border-color: rgba(239, 68, 68, 0.45);
+              background: linear-gradient(135deg, rgba(35, 15, 18, 0.85) 0%, rgba(20, 10, 15, 0.95) 100%);
+            }
+
+            .vis-preflight-card.allowed {
+              border-color: rgba(16, 185, 129, 0.4);
+              background: linear-gradient(135deg, rgba(10, 30, 22, 0.85) 0%, rgba(12, 22, 28, 0.95) 100%);
+            }
+
+            .vis-preflight-header {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              gap: 12px;
+              margin-bottom: 14px;
+            }
+
+            .vis-preflight-title-box {
+              display: flex;
+              align-items: center;
+              gap: 10px;
+            }
+
+            .vis-preflight-icon {
+              font-size: 18px;
+            }
+
+            .vis-preflight-title {
+              margin: 0;
+              font-size: 14.5px;
+              font-weight: 700;
+              color: #FFFFFF;
+            }
+
+            .vis-preflight-subtitle {
+              margin: 2px 0 0;
+              font-size: 11.5px;
+              color: var(--vis-text-secondary);
+            }
+
+            .vis-preflight-badge {
+              padding: 4px 10px;
+              border-radius: 999px;
+              font-size: 10px;
+              font-weight: 800;
+              letter-spacing: 0.5px;
+            }
+
+            .vis-preflight-badge.approved {
+              background: rgba(16, 185, 129, 0.15);
+              color: var(--vis-emerald);
+              border: 1px solid rgba(16, 185, 129, 0.35);
+            }
+
+            .vis-preflight-badge.blocked {
+              background: rgba(239, 68, 68, 0.15);
+              color: #F87171;
+              border: 1px solid rgba(239, 68, 68, 0.35);
+            }
+
+            .vis-preflight-grid {
+              display: grid;
+              grid-template-columns: repeat(3, 1fr);
+              gap: 10px;
+              margin-bottom: 12px;
+            }
+
+            .vis-preflight-metric {
+              background: rgba(0, 0, 0, 0.35);
+              border: 1px solid rgba(255, 255, 255, 0.06);
+              border-radius: 8px;
+              padding: 10px 12px;
+              display: flex;
+              flex-direction: column;
+              gap: 2px;
+            }
+
+            .vis-preflight-label {
+              font-size: 10.5px;
+              color: var(--vis-text-muted);
+              text-transform: uppercase;
+              font-weight: 600;
+              letter-spacing: 0.5px;
+            }
+
+            .vis-preflight-val {
+              font-size: 17px;
+              font-weight: 800;
+              color: #FFFFFF;
+            }
+
+            .vis-preflight-val.gold { color: var(--vis-gold-bright); }
+            .vis-preflight-val.green { color: var(--vis-emerald); }
+            .vis-preflight-val.red { color: #F87171; }
+
+            .vis-preflight-sub {
+              font-size: 10.5px;
+              color: var(--vis-text-secondary);
+            }
+
+            .vis-preflight-msg {
+              padding: 10px 12px;
+              border-radius: 8px;
+              font-size: 12.5px;
+              line-height: 1.45;
+            }
+
+            .vis-preflight-msg.success {
+              background: rgba(16, 185, 129, 0.1);
+              border: 1px solid rgba(16, 185, 129, 0.25);
+              color: #A7F3D0;
+            }
+
+            .vis-preflight-msg.warning {
+              background: rgba(239, 68, 68, 0.12);
+              border: 1px solid rgba(239, 68, 68, 0.3);
+              color: #FECACA;
+            }
+
+            .vis-preflight-warning-text {
+              margin: 0 0 10px;
+              font-size: 12.5px;
+            }
+
+            .vis-preflight-cta-row {
+              display: flex;
+              gap: 10px;
+            }
+
+            .vis-preflight-upgrade-btn {
+              padding: 8px 16px;
+              border-radius: 8px;
+              background: var(--vis-gold-gradient);
+              color: #1A1303;
+              font-weight: 700;
+              font-size: 12.5px;
+              border: 1px solid rgba(255, 245, 180, 0.4);
+              cursor: pointer;
+              transition: all 0.2s;
+            }
+
+            .vis-preflight-upgrade-btn:hover {
+              filter: brightness(1.1);
+              transform: translateY(-1px);
+            }
+
+            .vis-tier-usage-tag {
+              margin-top: 6px;
+              font-size: 12px;
+              color: var(--vis-gold-bright);
+              font-weight: 600;
+            }
+
+            .vis-lock-badge {
+              font-size: 10px;
+              padding: 2px 7px;
+              border-radius: 4px;
+              background: rgba(239, 68, 68, 0.15);
+              color: #FCA5A5;
+              border: 1px solid rgba(239, 68, 68, 0.3);
+              font-weight: 700;
+              margin-left: 6px;
+              display: inline-flex;
+              align-items: center;
+              gap: 3px;
+            }
+
+            .vis-active-badge {
+              font-size: 10px;
+              padding: 2px 7px;
+              border-radius: 4px;
+              background: rgba(16, 185, 129, 0.15);
+              color: #6EE7B7;
+              border: 1px solid rgba(16, 185, 129, 0.3);
+              font-weight: 700;
+              margin-left: 6px;
+              display: inline-flex;
+              align-items: center;
+              gap: 3px;
+            }
+
+            @keyframes visFadeIn {
+              from { opacity: 0; transform: translateY(-4px); }
+              to { opacity: 1; transform: translateY(0); }
             }
 
             /* RESPONSIVE QUERIES */

@@ -9,6 +9,7 @@ import {
   DEFAULT_PLAN_ID,
   FEATURE_COMPARISON_MATRIX,
 } from "../constants/plans";
+import { getStorePlanStatus } from "../services/plan-enforcement.server";
 
 // ============================================================================
 // LOADER
@@ -24,8 +25,21 @@ export const loader = async ({ request }) => {
     lastSync: null,
   };
 
+  let planStatus = {
+    actualPlanId: "starter",
+    planName: "Starter",
+    tierLabel: "Starter Tier",
+    displayPrice: "$4.99",
+    limit: 1000,
+    used: 0,
+    remaining: 1000,
+    isUnlimited: false,
+    percentUsed: 0,
+    billingMonth: "Current Month",
+  };
+
   try {
-    const [count, sumAssigned, sumFound, latest] = await Promise.all([
+    const [count, sumAssigned, sumFound, latest, status] = await Promise.all([
       db.importHistory.count({ where: { shop: session.shop } }),
       db.importHistory.aggregate({
         where: { shop: session.shop },
@@ -40,7 +54,10 @@ export const loader = async ({ request }) => {
         orderBy: { createdAt: "desc" },
         select: { completedAt: true, createdAt: true },
       }),
+      getStorePlanStatus(session.shop, request),
     ]);
+
+    planStatus = status;
 
     historicalStats = {
       totalImports: count || 0,
@@ -59,6 +76,7 @@ export const loader = async ({ request }) => {
   return Response.json({
     shop: session.shop,
     historicalStats,
+    planStatus,
   });
 };
 
@@ -131,7 +149,7 @@ function ToggleSwitch({ checked, onChange, disabled = false, ariaLabel }) {
 /**
  * Reusable Plan Tier Card
  */
-function PlanCard({ plan, isCurrent, onSelect }) {
+function PlanCard({ plan, isCurrent, isActualStorePlan, onSelect }) {
   const isRecommended = plan.recommended;
 
   return (
@@ -149,8 +167,11 @@ function PlanCard({ plan, isCurrent, onSelect }) {
           <span className={`set-plan-tag ${plan.badgeColor || "gold"}`}>
             {plan.badge}
           </span>
-          {isCurrent && (
-            <span className="set-plan-current-tag">CURRENT PREVIEW</span>
+          {isActualStorePlan && (
+            <span className="set-plan-current-tag">ACTIVE STORE PLAN</span>
+          )}
+          {!isActualStorePlan && isCurrent && (
+            <span className="set-plan-current-tag">PREVIEWING TIER</span>
           )}
         </div>
 
@@ -191,10 +212,14 @@ function PlanCard({ plan, isCurrent, onSelect }) {
           className={`set-plan-cta-btn ${isCurrent ? "active-btn" : "upgrade-btn"}`}
           onClick={() => onSelect(plan.id)}
         >
-          {isCurrent ? "Current Preview Plan" : `Preview ${plan.name} Plan`}
+          {isActualStorePlan
+            ? "Active Store Plan"
+            : isCurrent
+            ? `Previewing ${plan.name} Plan`
+            : `Preview ${plan.name} Plan`}
         </button>
         <div className="set-plan-subnote">
-          Phase 1 Architecture · Non-billing placeholder
+          Phase 2 Server Quota Active · Shopify Billing Checkout in Phase 3
         </div>
       </div>
     </div>
@@ -204,76 +229,92 @@ function PlanCard({ plan, isCurrent, onSelect }) {
 /**
  * Reusable Real Store Usage Card
  */
-function UsageCard({ currentPlan, historicalStats }) {
+function UsageCard({ currentPlan, historicalStats, planStatus }) {
   const planConfig = PLANS[currentPlan] || PLANS[PLAN_IDS.STARTER];
-  const totalAssigned = historicalStats.totalAssigned || 0;
-  const limit = planConfig.monthlyImageLimit;
+  const actualPlanConfig =
+    PLANS[planStatus?.actualPlanId] || PLANS[PLAN_IDS.STARTER];
+  const totalAssigned = historicalStats?.totalAssigned || 0;
+  const monthUsed = planStatus?.used || 0;
+  const actualLimit = planStatus?.limit;
 
-  const usagePercent = useMemo(() => {
-    if (!limit) return 100; // Unlimited
-    return Math.min(100, Math.round((totalAssigned / limit) * 100));
-  }, [totalAssigned, limit]);
+  const monthPercent = useMemo(() => {
+    if (!actualLimit) return 100;
+    return Math.min(100, Math.round((monthUsed / actualLimit) * 100));
+  }, [monthUsed, actualLimit]);
 
   return (
     <div className="set-usage-card">
       <div className="set-usage-header">
         <div className="set-usage-title-col">
-          <span className="set-usage-badge">LIVE STORE USAGE · PHASE 1</span>
-          <h3 className="set-usage-title">Catalog Variant Sync Volume</h3>
+          <span className="set-usage-badge">LIVE STORE USAGE · PHASE 2 ENFORCEMENT</span>
+          <h3 className="set-usage-title">Monthly Quota & Image Consumption</h3>
           <p className="set-usage-desc">
-            Derived directly from your Shopify store's historical image sync batches.
+            Enforced server-side for billing cycle:{" "}
+            <strong>{planStatus?.billingMonth || "Current Month"}</strong>.
           </p>
         </div>
         <div className="set-usage-plan-pill">
-          <span className="set-plan-pill-name">{planConfig.name} Plan</span>
-          <span className="set-plan-pill-price">{planConfig.displayPrice}/mo</span>
+          <span className="set-plan-pill-name">{actualPlanConfig.name} Plan (Active)</span>
+          <span className="set-plan-pill-price">{actualPlanConfig.displayPrice}/mo</span>
         </div>
       </div>
 
       <div className="set-usage-metric-grid">
         <div className="set-usage-stat-box">
-          <span className="set-stat-label">Synced Variants to Date</span>
-          <span className="set-stat-val gold">{totalAssigned.toLocaleString()}</span>
-          <span className="set-stat-sub">Real database records</span>
+          <span className="set-stat-label">Current Month Synced</span>
+          <span className="set-stat-val gold">{monthUsed.toLocaleString()}</span>
+          <span className="set-stat-sub">Assigned in {planStatus?.billingMonth}</span>
         </div>
         <div className="set-usage-stat-box">
-          <span className="set-stat-label">Total Sync Batches</span>
-          <span className="set-stat-val">
-            {(historicalStats.totalImports || 0).toLocaleString()}
+          <span className="set-stat-label">Remaining Allowance</span>
+          <span className="set-stat-val green">
+            {planStatus?.isUnlimited
+              ? "Unlimited"
+              : `${(planStatus?.remaining || 0).toLocaleString()} left`}
           </span>
-          <span className="set-stat-sub">Completed executions</span>
+          <span className="set-stat-sub">{actualPlanConfig.name} Monthly Quota</span>
         </div>
         <div className="set-usage-stat-box">
-          <span className="set-stat-label">Monthly Tier Quota</span>
+          <span className="set-stat-label">Lifetime Synced Variants</span>
           <span className="set-stat-val cyan">
-            {limit ? `${limit.toLocaleString()} / mo` : "Unlimited"}
+            {totalAssigned.toLocaleString()}
           </span>
-          <span className="set-stat-sub">{planConfig.name} allowance</span>
+          <span className="set-stat-sub">
+            Across {(historicalStats?.totalImports || 0).toLocaleString()} batches
+          </span>
         </div>
       </div>
 
       <div className="set-usage-meter-section">
         <div className="set-meter-label-row">
-          <span>Tier Capacity Consumption</span>
+          <span>{actualPlanConfig.name} Monthly Allowance Usage</span>
           <strong>
-            {limit
-              ? `${totalAssigned.toLocaleString()} / ${limit.toLocaleString()} images (${usagePercent}%)`
-              : `${totalAssigned.toLocaleString()} images (Unmetered Enterprise)`}
+            {planStatus?.isUnlimited
+              ? `${monthUsed.toLocaleString()} images (Unmetered Pro)`
+              : `${monthUsed.toLocaleString()} / ${(actualLimit || 1000).toLocaleString()} images (${monthPercent}%)`}
           </strong>
         </div>
         <div className="set-meter-track">
           <div
             className="set-meter-fill"
-            style={{ width: `${usagePercent}%` }}
+            style={{
+              width: planStatus?.isUnlimited ? "100%" : `${monthPercent}%`,
+              background:
+                !planStatus?.isUnlimited && monthPercent > 90
+                  ? "linear-gradient(90deg, #EF4444, #F87171)"
+                  : !planStatus?.isUnlimited && monthPercent > 75
+                  ? "linear-gradient(90deg, #F59E0B, #FBBF24)"
+                  : undefined,
+            }}
           />
         </div>
         <div className="set-meter-footer-note">
           <span>
-            {limit
-              ? `${Math.max(0, limit - totalAssigned).toLocaleString()} variants remaining in ${planConfig.name} tier limit`
-              : "Unlimited throughput enabled for Pro tier"}
+            {planStatus?.isUnlimited
+              ? "Unmetered volume enabled for Pro plan"
+              : `${(planStatus?.remaining || 0).toLocaleString()} images remaining before quota is reached.`}
           </span>
-          <span>Phase 1 Architecture · Billing enforcement inactive</span>
+          <span>Phase 2 Server Quota Enforcement Active</span>
         </div>
       </div>
     </div>
@@ -410,14 +451,16 @@ function PlanComparisonTable({ selectedPlan, onSelectPlan }) {
 // ============================================================================
 
 export default function SettingsPage() {
-  const { shop, historicalStats } = useLoaderData();
+  const { shop, historicalStats, planStatus } = useLoaderData();
   const navigate = useNavigate();
 
   // Navigation tab state
   const [activeTab, setActiveTab] = useState("plans");
 
-  // Plan architecture simulator state (Phase 1 default: Starter)
-  const [currentPlan, setCurrentPlan] = useState(DEFAULT_PLAN_ID);
+  // Plan architecture simulator state (Phase 2: active store plan)
+  const [currentPlan, setCurrentPlan] = useState(
+    planStatus?.actualPlanId || DEFAULT_PLAN_ID
+  );
 
   // Toast feedback state
   const [toastMessage, setToastMessage] = useState(null);
@@ -600,14 +643,14 @@ export default function SettingsPage() {
         ======================================================= */}
         {activeTab === "plans" && (
           <div className="set-tab-pane">
-            {/* Phase 1 Status Banner */}
+            {/* Phase 2 Status Banner */}
             <div className="set-phase-banner">
-              <div className="set-phase-icon">ℹ️</div>
+              <div className="set-phase-icon">⚡</div>
               <div className="set-phase-content">
-                <strong>Phase 1 Architecture Notice:</strong> You are currently viewing the
-                central plan configuration and usage simulator. Shopify Billing API integration
-                and subscription charges will be connected in Phase 3. Full sync functionality
-                is currently active for your store without billing restrictions.
+                <strong>Phase 2 Server Quota Enforcement Active:</strong> Monthly image limits
+                (Starter: 1,000 / Growth: 5,000 / Pro: Unlimited) are actively enforced on the server
+                before import jobs execute. Real billing checkout with Shopify Billing API is scheduled
+                for Phase 3.
               </div>
             </div>
 
@@ -615,6 +658,7 @@ export default function SettingsPage() {
             <UsageCard
               currentPlan={currentPlan}
               historicalStats={historicalStats}
+              planStatus={planStatus}
             />
 
             {/* Plan Tier Cards Grid */}
@@ -624,8 +668,8 @@ export default function SettingsPage() {
                   <span className="set-plans-badge">SUBSCRIPTION TIERS</span>
                   <h2 className="set-plans-title">Available Subscription Plans</h2>
                   <p className="set-plans-desc">
-                    Select a tier below to preview limits and features. Billing will be
-                    integrated in Phase 3.
+                    Select a tier below to preview limits and features. Server quota enforcement
+                    is active for your store's assigned plan.
                   </p>
                 </div>
               </div>
@@ -634,16 +678,19 @@ export default function SettingsPage() {
                 <PlanCard
                   plan={PLANS[PLAN_IDS.STARTER]}
                   isCurrent={currentPlan === PLAN_IDS.STARTER}
+                  isActualStorePlan={planStatus?.actualPlanId === PLAN_IDS.STARTER}
                   onSelect={handleSelectPlan}
                 />
                 <PlanCard
                   plan={PLANS[PLAN_IDS.GROWTH]}
                   isCurrent={currentPlan === PLAN_IDS.GROWTH}
+                  isActualStorePlan={planStatus?.actualPlanId === PLAN_IDS.GROWTH}
                   onSelect={handleSelectPlan}
                 />
                 <PlanCard
                   plan={PLANS[PLAN_IDS.PRO]}
                   isCurrent={currentPlan === PLAN_IDS.PRO}
+                  isActualStorePlan={planStatus?.actualPlanId === PLAN_IDS.PRO}
                   onSelect={handleSelectPlan}
                 />
               </div>

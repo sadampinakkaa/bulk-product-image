@@ -5,6 +5,7 @@ import {
 } from "./google-drive.server.js";
 
 import db from "../db.server";
+import { checkImportQuota } from "./plan-enforcement.server.js";
 
 const jobs = new Map();
 
@@ -41,6 +42,7 @@ export async function createImportJob({
   admin,
   shop,
   driveUrl,
+  planId = null,
 }) {
   const jobId =
     `${Date.now()}-${Math.random()
@@ -51,6 +53,8 @@ export async function createImportJob({
     id: jobId,
 
     shop,
+
+    planId,
 
     status: "starting",
 
@@ -211,6 +215,26 @@ async function runImportJob({
 
       saveImportHistory(job);
 
+      return;
+    }
+
+    // ==================================================
+    // 1b. PHASE 2: DEFENSE-IN-DEPTH QUOTA GUARD
+    // ==================================================
+    const quotaCheck = await checkImportQuota({
+      shop: job.shop,
+      requestedCount: uniqueDriveFiles.length,
+      planOverride: job.planId || null,
+    });
+
+    if (!quotaCheck.allowed) {
+      console.warn("[IMAGE IMPORT] Quota guard blocked execution:", quotaCheck.message);
+      job.status = "failed";
+      job.message = quotaCheck.message;
+      job.completedAt = new Date().toISOString();
+      job.summary.errors = 1;
+      job.errors = [{ file: "plan-quota", message: quotaCheck.message }];
+      saveImportHistory(job);
       return;
     }
 

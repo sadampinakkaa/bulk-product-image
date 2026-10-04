@@ -1,9 +1,8 @@
 // ============================================================================
-// CENTRAL PLAN CONFIGURATION & ARCHITECTURE (PHASE 1)
+// CENTRAL PLAN CONFIGURATION & ARCHITECTURE (PHASE 1 & PHASE 2)
 // ============================================================================
 // Defines tier configurations, pricing, limits, feature matrices, and upgrade paths.
-// NOTE: Phase 1 is for UI architecture & preview only.
-// Billing API and enforcement are reserved for Phases 2 & 3.
+// In Phase 2, this powers authoritative feature gating and monthly usage enforcement.
 // ============================================================================
 
 export const PLAN_IDS = {
@@ -34,7 +33,7 @@ export const PLANS = {
       { id: "staged_upload", name: "Shopify GraphQL Staged Upload API", included: true },
       { id: "image_limit", name: "Up to 1,000 Variant Syncs / Month", included: true },
       { id: "file_size", name: "Up to 20 MB File Size per Image", included: true },
-      { id: "concurrency", name: "Standard Queue Concurrency", included: true },
+      { id: "concurrency", name: "Standard Queue Concurrency (1 Worker)", included: true },
       { id: "priority_queue", name: "Accelerated / Priority Processing", included: false, tag: "Growth / Pro" },
       { id: "vip_support", name: "Dedicated 24/7 Technical Support", included: false, tag: "Pro Only" },
     ],
@@ -62,7 +61,7 @@ export const PLANS = {
       { id: "staged_upload", name: "Shopify GraphQL Staged Upload API", included: true },
       { id: "image_limit", name: "Up to 5,000 Variant Syncs / Month", included: true },
       { id: "file_size", name: "Up to 20 MB File Size per Image", included: true },
-      { id: "concurrency", name: "Accelerated Queue Concurrency (2x)", included: true },
+      { id: "concurrency", name: "Accelerated Queue Concurrency (3 Workers)", included: true },
       { id: "priority_queue", name: "Priority Processing Queue", included: true },
       { id: "vip_support", name: "Dedicated 24/7 Technical Support", included: false, tag: "Pro Only" },
     ],
@@ -90,8 +89,8 @@ export const PLANS = {
       { id: "staged_upload", name: "Shopify GraphQL Staged Upload API", included: true },
       { id: "image_limit", name: "Unlimited Variant Syncs / Month", included: true },
       { id: "file_size", name: "Up to 20 MB File Size per Image", included: true },
-      { id: "concurrency", name: "Maximum Concurrent Pipeline Workers", included: true },
-      { id: "priority_queue", name: "Top Priority Processing Queue", included: true },
+      { id: "concurrency", name: "Maximum Concurrent Pipeline Workers (5 Workers)", included: true },
+      { id: "priority_queue", name: "Top Priority VIP Processing Queue", included: true },
       { id: "vip_support", name: "Dedicated 24/7 Technical Support", included: true },
     ],
     upgradeTarget: null,
@@ -100,6 +99,141 @@ export const PLANS = {
 };
 
 export const DEFAULT_PLAN_ID = PLAN_IDS.STARTER;
+
+// ============================================================================
+// FEATURE IDENTIFIERS & PERMISSIONS MATRIX
+// ============================================================================
+
+export const FEATURES = {
+  GDRIVE_SYNC: "gdrive_sync",
+  SKU_MATCHING: "sku_matching",
+  STAGED_UPLOAD: "staged_upload",
+  SUFFIX_STRIPPING: "suffix_stripping",
+  ACCELERATED_QUEUE: "accelerated_queue",
+  PRIORITY_QUEUE: "priority_queue",
+  UNLIMITED_QUOTA: "unlimited_quota",
+  UNLIMITED_HISTORY: "unlimited_history",
+  EXPORT_LOGS: "export_logs",
+};
+
+export const PLAN_FEATURES = {
+  [PLAN_IDS.STARTER]: {
+    [FEATURES.GDRIVE_SYNC]: true,
+    [FEATURES.SKU_MATCHING]: true,
+    [FEATURES.STAGED_UPLOAD]: true,
+    [FEATURES.SUFFIX_STRIPPING]: true,
+    [FEATURES.ACCELERATED_QUEUE]: false,
+    [FEATURES.PRIORITY_QUEUE]: false,
+    [FEATURES.UNLIMITED_QUOTA]: false,
+    [FEATURES.UNLIMITED_HISTORY]: false,
+    [FEATURES.EXPORT_LOGS]: true,
+  },
+  [PLAN_IDS.GROWTH]: {
+    [FEATURES.GDRIVE_SYNC]: true,
+    [FEATURES.SKU_MATCHING]: true,
+    [FEATURES.STAGED_UPLOAD]: true,
+    [FEATURES.SUFFIX_STRIPPING]: true,
+    [FEATURES.ACCELERATED_QUEUE]: true,
+    [FEATURES.PRIORITY_QUEUE]: false,
+    [FEATURES.UNLIMITED_QUOTA]: false,
+    [FEATURES.UNLIMITED_HISTORY]: false,
+    [FEATURES.EXPORT_LOGS]: true,
+  },
+  [PLAN_IDS.PRO]: {
+    [FEATURES.GDRIVE_SYNC]: true,
+    [FEATURES.SKU_MATCHING]: true,
+    [FEATURES.STAGED_UPLOAD]: true,
+    [FEATURES.SUFFIX_STRIPPING]: true,
+    [FEATURES.ACCELERATED_QUEUE]: true,
+    [FEATURES.PRIORITY_QUEUE]: true,
+    [FEATURES.UNLIMITED_QUOTA]: true,
+    [FEATURES.UNLIMITED_HISTORY]: true,
+    [FEATURES.EXPORT_LOGS]: true,
+  },
+};
+
+/**
+ * Checks whether a feature is permitted on a given plan ID.
+ */
+export function canUseFeature(planId, featureId) {
+  const planPerms = PLAN_FEATURES[planId] || PLAN_FEATURES[DEFAULT_PLAN_ID];
+  return Boolean(planPerms[featureId]);
+}
+
+/**
+ * Gets the monthly image limit for a plan ID (null represents unlimited).
+ */
+export function getPlanLimit(planId) {
+  const plan = PLANS[planId] || PLANS[DEFAULT_PLAN_ID];
+  return plan.monthlyImageLimit;
+}
+
+/**
+ * Pure function: Evaluates whether a requested import amount is allowed
+ * based on the plan limit and current monthly usage.
+ */
+export function evaluateQuotaDecision({ planId, used = 0, requestedCount = 0 }) {
+  const safePlanId = PLANS[planId] ? planId : DEFAULT_PLAN_ID;
+  const plan = PLANS[safePlanId];
+  const limit = plan.monthlyImageLimit; // 1000 for starter, 5000 for growth, null for pro
+
+  const safeUsed = Math.max(0, Number(used) || 0);
+  const safeRequested = Math.max(0, Number(requestedCount) || 0);
+
+  // Pro is completely unmetered / unlimited
+  if (limit === null) {
+    return {
+      allowed: true,
+      planId: safePlanId,
+      planName: plan.name,
+      limit: null,
+      used: safeUsed,
+      remaining: null,
+      requestedCount: safeRequested,
+      isUnlimited: true,
+      message: "Pro tier provides unmetered sync volume. Import is approved.",
+    };
+  }
+
+  const remaining = Math.max(0, limit - safeUsed);
+  const fits = safeUsed + safeRequested <= limit;
+
+  if (fits) {
+    return {
+      allowed: true,
+      planId: safePlanId,
+      planName: plan.name,
+      limit,
+      used: safeUsed,
+      remaining,
+      requestedCount: safeRequested,
+      isUnlimited: false,
+      message: `${safeRequested.toLocaleString()} images requested. You have ${remaining.toLocaleString()} images remaining in your ${plan.name} allowance.`,
+    };
+  }
+
+  // Blocked
+  const upgradeTarget = safePlanId === PLAN_IDS.STARTER ? PLANS[PLAN_IDS.GROWTH] : PLANS[PLAN_IDS.PRO];
+  const blockedMessage = `Your ${plan.name} plan has ${remaining.toLocaleString()} images remaining this month. This import requires ${safeRequested.toLocaleString()} images. Upgrade your plan to continue.`;
+
+  return {
+    allowed: false,
+    planId: safePlanId,
+    planName: plan.name,
+    limit,
+    used: safeUsed,
+    remaining,
+    requestedCount: safeRequested,
+    isUnlimited: false,
+    upgradeTarget: upgradeTarget.name,
+    upgradePrice: upgradeTarget.displayPrice,
+    message: blockedMessage,
+  };
+}
+
+// ============================================================================
+// FEATURE COMPARISON MATRIX (SETTINGS & DASHBOARD TABLE)
+// ============================================================================
 
 export const FEATURE_COMPARISON_MATRIX = [
   {
