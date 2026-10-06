@@ -90,10 +90,15 @@ await test("Maps exact handles: 'starter', 'growth', 'pro'", () => {
 
 await test("Maps case-insensitive and variant handles", () => {
   assert.equal(mapShopifyHandleToPlanId("STARTER"), PLAN_IDS.STARTER);
+  assert.equal(mapShopifyHandleToPlanId("Starter Plan"), PLAN_IDS.STARTER);
   assert.equal(mapShopifyHandleToPlanId("growth_monthly"), PLAN_IDS.GROWTH);
   assert.equal(mapShopifyHandleToPlanId("Growth-Tier"), PLAN_IDS.GROWTH);
+  assert.equal(mapShopifyHandleToPlanId("Growth Plan"), PLAN_IDS.GROWTH);
+  assert.equal(mapShopifyHandleToPlanId("Growth - $10.99/mo"), PLAN_IDS.GROWTH);
   assert.equal(mapShopifyHandleToPlanId("pro_enterprise"), PLAN_IDS.PRO);
   assert.equal(mapShopifyHandleToPlanId("Pro-Monthly"), PLAN_IDS.PRO);
+  assert.equal(mapShopifyHandleToPlanId("Pro Plan"), PLAN_IDS.PRO);
+  assert.equal(mapShopifyHandleToPlanId("Pro Tier"), PLAN_IDS.PRO);
 });
 
 await test("Unknown or invalid handles return null (never accidentally grants paid tiers)", () => {

@@ -395,7 +395,7 @@ function UsageCard({ currentPlan, historicalStats, planStatus }) {
 /**
  * Reusable Feature Comparison Table
  */
-function PlanComparisonTable({ selectedPlan, onSelectPlan }) {
+function PlanComparisonTable({ selectedPlan, actualPlanId, pricingPlansUrl, onSelectPlan }) {
   return (
     <div className="set-compare-wrap">
       <div className="set-compare-header">
@@ -412,44 +412,65 @@ function PlanComparisonTable({ selectedPlan, onSelectPlan }) {
           <thead>
             <tr>
               <th className="th-feature">Feature / Capability</th>
-              <th className={`th-plan ${selectedPlan === "starter" ? "current-th" : ""}`}>
+              <th className={`th-plan ${actualPlanId === "starter" ? "current-th" : ""}`}>
                 <div className="th-plan-box">
                   <span className="th-plan-name">Starter</span>
                   <span className="th-plan-price">$4.99/mo</span>
-                  <button
-                    type="button"
-                    className="th-select-btn"
-                    onClick={() => onSelectPlan("starter")}
-                  >
-                    {selectedPlan === "starter" ? "Active" : "Select"}
-                  </button>
+                  {actualPlanId === "starter" ? (
+                    <button type="button" className="th-select-btn" disabled>
+                      ✓ Current Plan
+                    </button>
+                  ) : (
+                    <a
+                      href={pricingPlansUrl || "#"}
+                      target="_top"
+                      rel="noopener noreferrer"
+                      className="th-select-btn"
+                    >
+                      Change Plan ↗
+                    </a>
+                  )}
                 </div>
               </th>
-              <th className={`th-plan ${selectedPlan === "growth" ? "current-th" : ""}`}>
+              <th className={`th-plan ${actualPlanId === "growth" ? "current-th" : ""}`}>
                 <div className="th-plan-box">
                   <span className="th-plan-badge">POPULAR</span>
                   <span className="th-plan-name">Growth</span>
                   <span className="th-plan-price">$10.99/mo</span>
-                  <button
-                    type="button"
-                    className="th-select-btn"
-                    onClick={() => onSelectPlan("growth")}
-                  >
-                    {selectedPlan === "growth" ? "Active" : "Select"}
-                  </button>
+                  {actualPlanId === "growth" ? (
+                    <button type="button" className="th-select-btn" disabled>
+                      ✓ Current Plan
+                    </button>
+                  ) : (
+                    <a
+                      href={pricingPlansUrl || "#"}
+                      target="_top"
+                      rel="noopener noreferrer"
+                      className="th-select-btn"
+                    >
+                      {actualPlanId === "pro" ? "Change Plan ↗" : "Upgrade to Growth ↗"}
+                    </a>
+                  )}
                 </div>
               </th>
-              <th className={`th-plan ${selectedPlan === "pro" ? "current-th" : ""}`}>
+              <th className={`th-plan ${actualPlanId === "pro" ? "current-th" : ""}`}>
                 <div className="th-plan-box">
                   <span className="th-plan-name">Pro</span>
                   <span className="th-plan-price">$19.99/mo</span>
-                  <button
-                    type="button"
-                    className="th-select-btn"
-                    onClick={() => onSelectPlan("pro")}
-                  >
-                    {selectedPlan === "pro" ? "Active" : "Select"}
-                  </button>
+                  {actualPlanId === "pro" ? (
+                    <button type="button" className="th-select-btn" disabled>
+                      ✓ Current Plan
+                    </button>
+                  ) : (
+                    <a
+                      href={pricingPlansUrl || "#"}
+                      target="_top"
+                      rel="noopener noreferrer"
+                      className="th-select-btn"
+                    >
+                      Upgrade to Pro ↗
+                    </a>
+                  )}
                 </div>
               </th>
             </tr>
@@ -595,7 +616,7 @@ export default function SettingsPage() {
     }
     const targetPlan = PLANS[planId];
     showToast(
-      `Switched to ${targetPlan.name} (${targetPlan.displayPrice}/mo) preview. Shopify Billing will be connected in Phase 3.`,
+      `Viewing ${targetPlan.name} (${targetPlan.displayPrice}/mo) feature preview. Use Upgrade to activate in Shopify.`,
     );
   };
 
@@ -789,6 +810,8 @@ export default function SettingsPage() {
             {/* Detailed Plan Comparison Table */}
             <PlanComparisonTable
               selectedPlan={currentPlan}
+              actualPlanId={planStatus?.actualPlanId}
+              pricingPlansUrl={planStatus?.pricingPlansUrl}
               onSelectPlan={handleSelectPlan}
             />
           </div>

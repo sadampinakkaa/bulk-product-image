@@ -112,8 +112,9 @@ export async function verifyShopifySubscription({
   // 3. Partner API (ActiveSubscription query) if credentials configured
   const partnerToken = process.env.SHOPIFY_PARTNER_API_TOKEN;
   const appId = process.env.SHOPIFY_APP_ID;
+  const orgId = process.env.SHOPIFY_PARTNER_ORGANIZATION_ID;
 
-  if (partnerToken && appId && admin?.graphql) {
+  if (partnerToken && appId && orgId && admin?.graphql) {
     try {
       const shopRes = await admin.graphql(`
         query GetShopId {
@@ -126,7 +127,7 @@ export async function verifyShopifySubscription({
       const shopGid = shopData?.data?.shop?.id;
 
       if (shopGid) {
-        const partnerApiRes = await fetch("https://partners.shopify.com/api/2026-10/graphql.json", {
+        const partnerApiRes = await fetch(`https://partners.shopify.com/${orgId}/api/2026-10/graphql.json`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -196,6 +197,12 @@ export async function verifyShopifySubscription({
       const adminSubRes = await admin.graphql(`
         query GetAppSubscriptions {
           currentAppInstallation {
+            id
+            app {
+              id
+              title
+              handle
+            }
             activeSubscriptions {
               id
               name
@@ -224,11 +231,16 @@ export async function verifyShopifySubscription({
       const activeSubs = adminJson?.data?.currentAppInstallation?.activeSubscriptions;
 
       if (Array.isArray(activeSubs) && activeSubs.length > 0) {
-        const primarySub = activeSubs[0];
-        if (primarySub.status === "ACTIVE") {
-          let mappedPlanId = mapShopifyHandleToPlanId(primarySub.name);
-          if (!mappedPlanId && primarySub.lineItems?.[0]?.plan?.pricingDetails?.price?.amount) {
-            const amount = parseFloat(primarySub.lineItems[0].plan.pricingDetails.price.amount);
+        // Prioritize actively running or accepted subscription
+        const activeSub =
+          activeSubs.find(
+            (sub) => sub?.status === "ACTIVE" || sub?.status === "ACCEPTED"
+          ) || activeSubs[0];
+
+        if (activeSub && (activeSub.status === "ACTIVE" || activeSub.status === "ACCEPTED")) {
+          let mappedPlanId = mapShopifyHandleToPlanId(activeSub.name);
+          if (!mappedPlanId && activeSub.lineItems?.[0]?.plan?.pricingDetails?.price?.amount) {
+            const amount = parseFloat(activeSub.lineItems[0].plan.pricingDetails.price.amount);
             if (amount >= 19.0) mappedPlanId = PLAN_IDS.PRO;
             else if (amount >= 10.0) mappedPlanId = PLAN_IDS.GROWTH;
             else if (amount >= 4.0) mappedPlanId = PLAN_IDS.STARTER;
@@ -239,9 +251,9 @@ export async function verifyShopifySubscription({
               active: true,
               planId: mappedPlanId,
               status: "ACTIVE",
-              subscriptionId: primarySub.id,
-              subscriptionName: primarySub.name,
-              currentPeriodEnd: primarySub.currentPeriodEnd,
+              subscriptionId: activeSub.id,
+              subscriptionName: activeSub.name,
+              currentPeriodEnd: activeSub.currentPeriodEnd,
               source: "admin_graphql",
               verifiedAt: new Date().toISOString(),
               expiresAt: Date.now() + CACHE_TTL_MS,
@@ -249,12 +261,12 @@ export async function verifyShopifySubscription({
             subscriptionCache.set(shop, result);
             return result;
           }
-        } else if (["DECLINED", "EXPIRED", "FROZEN", "CANCELLED"].includes(primarySub.status)) {
+        } else if (["DECLINED", "EXPIRED", "FROZEN", "CANCELLED"].includes(activeSub?.status)) {
           const inactiveResult = {
             active: false,
             planId: DEFAULT_PLAN_ID,
-            status: primarySub.status,
-            subscriptionId: primarySub.id,
+            status: activeSub.status,
+            subscriptionId: activeSub.id,
             source: "admin_graphql",
             verifiedAt: new Date().toISOString(),
             expiresAt: Date.now() + CACHE_TTL_MS,

@@ -140,13 +140,13 @@ export function mapShopifyHandleToPlanId(rawHandle) {
   if (normalized === proConfig) return PLAN_IDS.PRO;
 
   // 2. Resilient token matching for standard plan naming conventions
-  if (/(^|[-_])(pro|professional)([-_]|$)/i.test(normalized)) {
+  if (/\b(pro|professional)\b/i.test(normalized) || /(^|[\s\-_])(pro|professional)([\s\-_]|$)/i.test(normalized)) {
     return PLAN_IDS.PRO;
   }
-  if (/(^|[-_])(growth)([-_]|$)/i.test(normalized)) {
+  if (/\b(growth)\b/i.test(normalized) || /(^|[\s\-_])(growth)([\s\-_]|$)/i.test(normalized)) {
     return PLAN_IDS.GROWTH;
   }
-  if (/(^|[-_])(starter|basic)([-_]|$)/i.test(normalized)) {
+  if (/\b(starter|basic)\b/i.test(normalized) || /(^|[\s\-_])(starter|basic)([\s\-_]|$)/i.test(normalized)) {
     return PLAN_IDS.STARTER;
   }
 
